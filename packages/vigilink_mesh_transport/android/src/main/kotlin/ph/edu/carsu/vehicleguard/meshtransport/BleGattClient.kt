@@ -41,7 +41,17 @@ class BleGattClient(private val context: Context) {
         // anything. Upgraded automatically if onMtuChanged reports more
         // before writing begins.
         private const val SAFE_CHUNK_BYTES = 20
-        private const val OPERATION_TIMEOUT_MS = 15_000L
+
+        // Raised from 15s: real-device testing kept hitting this timeout
+        // even with retries, with no onStageInfo milestone (connected /
+        // characteristic found) appearing first in some cases — meaning
+        // the connection itself was still negotiating, not stuck on a slow
+        // write. More patience per attempt, combined with
+        // VigilinkMeshTransportPlugin's own retries, trades speed for a
+        // real chance to ride out radio contention — bounded, not infinite,
+        // so this can't hang forever the way the old Wi-Fi Direct connect()
+        // did before it got a timeout at all.
+        private const val OPERATION_TIMEOUT_MS = 30_000L
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())

@@ -190,16 +190,19 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
         private const val GATT_QUEUE_GAP_MS = 400L
 
         // Real testing after the queue fix above still showed "characteristic
-        // not found on peer" and 15s timeouts — not a permanent failure, but
+        // not found on peer" and timeouts — not a permanent failure, but
         // the peer's own GATT server (or the radio link itself) not being
         // ready yet at the exact moment of one single attempt. A GATT
-        // operation here already has its own 15s cap (BleGattClient), so
+        // operation here already has its own timeout (BleGattClient), so
         // retrying a bounded number of times instead of giving up after one
         // attempt gives real room for that to resolve, without reintroducing
         // the "hangs forever" failure mode the old Wi-Fi Direct connect()
-        // had before it got its own timeout.
-        private const val GATT_RETRY_GAP_MS = 1_500L
-        private const val GATT_MAX_ATTEMPTS = 4
+        // had before it got its own timeout. Raised from 4 attempts / 1.5s
+        // gap after real-device testing kept failing even with that budget —
+        // worst case is now 6 x 30s + 5 x 2s = 190s, so _alertAckTimeout in
+        // app_state.dart must stay comfortably above this.
+        private const val GATT_RETRY_GAP_MS = 2_000L
+        private const val GATT_MAX_ATTEMPTS = 6
     }
 
     /**
