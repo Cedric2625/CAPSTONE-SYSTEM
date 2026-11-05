@@ -145,6 +145,8 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             ble.stop()
             isActive = false
         }
+        gattQueue.clear()
+        gattBusyAddresses.clear()
         mainHandler.postDelayed({
             val bleStarted = ble.start()
             val started = bleStarted && gattServer.start()
@@ -162,6 +164,8 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             teardownRunnable = null
             gattServer.stop()
             ble.stop()
+            gattQueue.clear()
+            gattBusyAddresses.clear()
         }
         teardownRunnable = r
         mainHandler.postDelayed(r, TEARDOWN_DEBOUNCE_MS)
@@ -170,6 +174,45 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
     companion object {
         private const val TEARDOWN_DEBOUNCE_MS = 6_000L
         private const val HARD_RESET_DELAY_MS = 1_500L
+
+        // Real test confirmed this: a connect-probe and the catch-up
+        // loop's several sendTo calls (one per currently-stored alert) all
+        // fired at once, each opening its OWN connectGatt() to the SAME
+        // peer address — overlapping GATT connections to one remote
+        // device is a well-known real cause of Android's generic BLE
+        // error 133 ("disconnected before send completed"), which is
+        // exactly what the logs showed. A short gap between releasing one
+        // queued operation and starting the next gives the BLE stack time
+        // to actually finish releasing the previous connection first.
+        private const val GATT_QUEUE_GAP_MS = 400L
+    }
+
+    // Serializes every BLE GATT operation (the connection probe AND every
+    // real send) by target device address, so this device never has two
+    // overlapping connectGatt() calls to the same peer in flight — see
+    // GATT_QUEUE_GAP_MS above for why that matters.
+    private val gattQueue = mutableMapOf<String, ArrayDeque<() -> Unit>>()
+    private val gattBusyAddresses = mutableSetOf<String>()
+
+    private fun runSerializedOnAddress(address: String, action: () -> Unit) {
+        val queue = gattQueue.getOrPut(address) { ArrayDeque() }
+        queue.addLast(action)
+        if (gattBusyAddresses.add(address)) {
+            runNextQueued(address)
+        }
+    }
+
+    private fun runNextQueued(address: String) {
+        val next = gattQueue[address]?.removeFirstOrNull()
+        if (next == null) {
+            gattBusyAddresses.remove(address)
+            return
+        }
+        next()
+    }
+
+    private fun releaseAddressAfterDelay(address: String) {
+        mainHandler.postDelayed({ runNextQueued(address) }, GATT_QUEUE_GAP_MS)
     }
 
     /**
@@ -192,22 +235,25 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             )
             return false
         }
-        val client = BleGattClient(context)
-        client.listener = object : BleGattClient.Listener {
-            override fun onResult(success: Boolean, detail: String) {
-                if (success) {
-                    handleConnected(endpointId, "VIGILINK User", incoming = false)
-                } else {
-                    sendEvent(
-                        mapOf(
-                            "event" to "onTransportError",
-                            "message" to "BLE GATT connection attempt to $endpointId failed: $detail"
+        runSerializedOnAddress(device.address) {
+            val client = BleGattClient(context)
+            client.listener = object : BleGattClient.Listener {
+                override fun onResult(success: Boolean, detail: String) {
+                    if (success) {
+                        handleConnected(endpointId, "VIGILINK User", incoming = false)
+                    } else {
+                        sendEvent(
+                            mapOf(
+                                "event" to "onTransportError",
+                                "message" to "BLE GATT connection attempt to $endpointId failed: $detail"
+                            )
                         )
-                    )
+                    }
+                    releaseAddressAfterDelay(device.address)
                 }
             }
+            client.send(device, ble.myCurrentToken, ByteArray(0))
         }
-        client.send(device, ble.myCurrentToken, ByteArray(0))
         return true
     }
 
@@ -223,21 +269,24 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             result.success(false)
             return
         }
-        val client = BleGattClient(context)
-        client.listener = object : BleGattClient.Listener {
-            override fun onResult(success: Boolean, detail: String) {
-                if (!success) {
-                    sendEvent(
-                        mapOf(
-                            "event" to "onTransportError",
-                            "message" to "sendBytesPayload to $endpointId failed: $detail"
+        runSerializedOnAddress(device.address) {
+            val client = BleGattClient(context)
+            client.listener = object : BleGattClient.Listener {
+                override fun onResult(success: Boolean, detail: String) {
+                    if (!success) {
+                        sendEvent(
+                            mapOf(
+                                "event" to "onTransportError",
+                                "message" to "sendBytesPayload to $endpointId failed: $detail"
+                            )
                         )
-                    )
+                    }
+                    result.success(success)
+                    releaseAddressAfterDelay(device.address)
                 }
-                result.success(success)
             }
+            client.send(device, ble.myCurrentToken, bytes)
         }
-        client.send(device, ble.myCurrentToken, bytes)
     }
 
     // ── BLE: presence/signaling → Dart's onEndpointFound/onEndpointLost ──
