@@ -111,7 +111,13 @@ Future<TheftAlert?> ingestMeshTheftAlert(
   try {
     final db = DatabaseService.instance;
     final exists = await db.alertExists(id);
-    final hopCount = (msg['hopCount'] as num?)?.toInt() ?? 0;
+    // msg['hopCount'] is the SENDER's own distance from the original
+    // reporter (0 for the reporter itself) — this device is one hop
+    // further, so its own hop count is that value plus one. See
+    // alertWireMessage/alertMeshHops below for why this counts UP from
+    // the source rather than down from a TTL.
+    final receivedHop = (msg['hopCount'] as num?)?.toInt() ?? 0;
+    final myHop = receivedHop + 1;
     if (exists) {
       await logSink(
           'RELAY',
@@ -140,7 +146,7 @@ Future<TheftAlert?> ingestMeshTheftAlert(
         // (see AppState._alertWireMessage) — `photos` stays empty here on
         // purpose.
         notes: msg['notes'] as String? ?? '',
-        hopCount: hopCount,
+        hopCount: myHop,
         isDemoLocation: (msg['isDemoLocation'] as num?) == 1,
       );
       // Still rechecked at the DB level too — _inFlightAlertIds only closes
@@ -153,7 +159,7 @@ Future<TheftAlert?> ingestMeshTheftAlert(
           alertId: alert.id,
           nodeDeviceId: fromEndpointId,
           duplicate: false,
-          hopCount: hopCount);
+          hopCount: myHop);
       // Confirms to the sender that this alert was actually stored, not
       // merely that a socket write succeeded — a successful write only
       // proves the bytes left the sender's device. Sent back over the same
@@ -163,7 +169,7 @@ Future<TheftAlert?> ingestMeshTheftAlert(
       logAlertDelivery(alert, via: 'Ad Hoc Mesh', logSink: logSink);
       await logSink(
           'RELAY',
-          '📡 Real alert received: ${alert.plate} from $fromEndpointId (hop $hopCount)',
+          '📡 Real alert received: ${alert.plate} from $fromEndpointId (hop $myHop)',
           LogType.relay);
       await notifSink(
           '🚨 Stolen Vehicle Nearby!',
@@ -174,17 +180,20 @@ Future<TheftAlert?> ingestMeshTheftAlert(
           '${alert.plate} detected via a nearby device.',
           payload: alert.id);
 
-      // Store-carry-forward: relay onward to every OTHER connected peer,
-      // decrementing hop count with a TTL floor to prevent infinite loops.
-      if (hopCount > 0) {
+      // Store-carry-forward: relay onward to every OTHER connected peer.
+      // The forwarded copy carries THIS device's own hop count (myHop) —
+      // the next receiver adds one more to it itself (see receivedHop
+      // above), so the count climbs by exactly one per real hop traveled.
+      // Capped at alertMeshHops total hops to prevent infinite relay loops.
+      if (myHop < alertMeshHops) {
         final forwardMsg = Map<String, dynamic>.from(msg)
-          ..['hopCount'] = hopCount - 1;
+          ..['hopCount'] = myHop;
         final sentTo = await NearbyMeshService.instance
             .broadcast(forwardMsg, excludeEndpointId: fromEndpointId);
         if (sentTo.isNotEmpty) {
           await logSink(
               'RELAY',
-              'Forwarded ${alert.plate} alert to ${sentTo.length} other connected peer(s) (hop ${hopCount - 1})',
+              'Forwarded ${alert.plate} alert to ${sentTo.length} other connected peer(s) (will show as hop ${myHop + 1} there)',
               LogType.relay);
         }
       }
@@ -351,11 +360,17 @@ Future<TheftAlert?> ingestInternetAlert(
   }
 }
 
-/// TTL — how many hops a mesh alert may still be forwarded. Shared by
-/// AppState's own broadcast path and the background service's
-/// store-carry-forward catch-up (sending a currently-active alert to a
-/// newly-connected peer), so a peer gets the exact same message shape
-/// regardless of which isolate currently owns the mesh.
+/// Maximum number of real hops a mesh alert may travel from its original
+/// reporter before devices stop relaying it further (loop/flood
+/// prevention). `TheftAlert.hopCount` counts UP from 0 at the reporter
+/// (0 hops from itself) by exactly 1 per device that actually relayed it —
+/// see [ingestMeshTheftAlert]'s `receivedHop`/`myHop` — not down from a
+/// starting budget, so "Hop 3" always means "this alert actually traveled
+/// 3 hops to reach here," which is what the UI displays everywhere
+/// (`alert.hopCount`). Shared by AppState's own broadcast path and the
+/// background service's store-carry-forward catch-up (sending a currently-
+/// active alert to a newly-connected peer), so a peer gets the exact same
+/// message shape regardless of which isolate currently owns the mesh.
 const int alertMeshHops = 5;
 
 /// The alert as it goes over the mesh. Mirrors `AppState._alertWireMessage`
@@ -364,11 +379,13 @@ const int alertMeshHops = 5;
 /// tells receivers photos exist, so the Alert Received screen can say so
 /// honestly — the real pictures reach a nearby device once it syncs over
 /// the internet (see the Firestore alert listener), the same way a
-/// sighting's photo does.
+/// sighting's photo does. `hopCount` is NOT overridden here — it's sent as
+/// this device's own current `a.hopCount` (0 for a fresh report from its
+/// original reporter, or whatever this device's own hop count already is
+/// when relaying something it previously received) — see [alertMeshHops].
 Map<String, dynamic> alertWireMessage(TheftAlert a) =>
     Map<String, dynamic>.from(a.toMap())
       ..['msgType'] = 'theft_alert'
-      ..['hopCount'] = alertMeshHops
       ..['hasPhotoEvidence'] = a.hasPhoto
       ..remove('photos');
 
