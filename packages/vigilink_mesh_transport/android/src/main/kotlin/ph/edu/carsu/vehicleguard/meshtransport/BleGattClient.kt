@@ -71,6 +71,27 @@ class BleGattClient(private val context: Context) {
         if (gatt == null) finish(false, "connectGatt returned null")
     }
 
+    /**
+     * Abandons this operation WITHOUT calling the listener — for when the
+     * mesh itself is restarting/stopping while this send is still
+     * in-flight. A plain close() leaves [finished] false, so the native
+     * gattCallback (e.g. onConnectionStateChange firing DISCONNECTED once
+     * the restart tears down the radio underneath this orphaned operation)
+     * would still call finish(false, "disconnected before send completed
+     * (status=133)") afterward — a confusing, misleading failure for a
+     * send that was never really trying anymore, and a stray retry
+     * scheduled on a mesh that's already moved on. Marking finished first
+     * makes every later callback a no-op (they all already check it).
+     */
+    @SuppressLint("MissingPermission")
+    fun cancel() {
+        if (finished) return
+        finished = true
+        timeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        timeoutRunnable = null
+        close()
+    }
+
     @SuppressLint("MissingPermission")
     fun close() {
         try {

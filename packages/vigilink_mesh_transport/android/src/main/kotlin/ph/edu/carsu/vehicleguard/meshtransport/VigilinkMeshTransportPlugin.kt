@@ -146,6 +146,7 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             ble.stop()
             isActive = false
         }
+        cancelAllInFlightGattClients()
         gattQueue.clear()
         gattBusyAddresses.clear()
         mainHandler.postDelayed({
@@ -165,6 +166,7 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             teardownRunnable = null
             gattServer.stop()
             ble.stop()
+            cancelAllInFlightGattClients()
             gattQueue.clear()
             gattBusyAddresses.clear()
         }
@@ -208,6 +210,18 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
      * turned out to be transient/timing-related rather than permanent, so
      * this retries on any failure, not just one specific message.
      */
+    // Every BleGattClient currently mid-operation (connecting/discovering/
+    // writing), across every target address — tracked so a mesh
+    // restart/stop can cancel() them instead of abandoning them. See
+    // BleGattClient.cancel()'s doc comment for why an abandoned (not
+    // cancelled) operation produces a confusing, misleading failure later.
+    private val inFlightGattClients = mutableSetOf<BleGattClient>()
+
+    private fun cancelAllInFlightGattClients() {
+        for (client in inFlightGattClients) client.cancel()
+        inFlightGattClients.clear()
+    }
+
     private fun sendWithRetry(
         device: BluetoothDevice,
         payload: ByteArray,
@@ -215,9 +229,11 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
         onFinalResult: (Boolean, String) -> Unit
     ) {
         val client = BleGattClient(context)
+        inFlightGattClients.add(client)
         client.onStageInfo = { message -> sendEvent(mapOf("event" to "onTransportInfo", "message" to message)) }
         client.listener = object : BleGattClient.Listener {
             override fun onResult(success: Boolean, detail: String) {
+                inFlightGattClients.remove(client)
                 if (success || attemptsLeft <= 1) {
                     onFinalResult(success, detail)
                     return
