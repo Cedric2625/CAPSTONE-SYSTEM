@@ -161,11 +161,22 @@ Future<TheftAlert?> ingestMeshTheftAlert(
           duplicate: false,
           hopCount: myHop);
       // Confirms to the sender that this alert was actually stored, not
-      // merely that a socket write succeeded — a successful write only
-      // proves the bytes left the sender's device. Sent back over the same
-      // mesh connection the alert itself arrived on.
+      // merely that a write succeeded — a successful write only proves the
+      // bytes left the sender's device. On the real BLE GATT transport this
+      // is NOT "the same connection the alert arrived on" (BLE GATT
+      // connections here are one-shot, per send) — it's a brand-new
+      // connectGatt() from this device back to the sender's address, with
+      // its own real cost. Logged explicitly (unlike before) so a slow or
+      // failed ack is visible in System Logs instead of silently invisible.
       unawaited(NearbyMeshService.instance
-          .sendTo(fromEndpointId, {'msgType': 'alert_ack', 'alertId': id}));
+          .sendTo(fromEndpointId, {'msgType': 'alert_ack', 'alertId': id}).then((ok) {
+        if (!ok) {
+          logSink(
+              'RELAY',
+              'Failed to send delivery confirmation (alert_ack) for $id back to $fromEndpointId',
+              LogType.err);
+        }
+      }));
       logAlertDelivery(alert, via: 'Ad Hoc Mesh', logSink: logSink);
       await logSink(
           'RELAY',

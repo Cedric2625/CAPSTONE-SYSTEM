@@ -2629,7 +2629,17 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  static const Duration _alertAckTimeout = Duration(seconds: 12);
+  // 12s was calibrated for the old TCP-socket transport, where an ack went
+  // back over the same already-open connection almost instantly. On the
+  // real BLE GATT transport, sending the ack back is its own brand-new
+  // connectGatt() round trip (see alert_ingest.dart's alert_ack comment) —
+  // a single BLE GATT send attempt already has a 15s timeout before any
+  // retry, and VigilinkMeshTransportPlugin's sendWithRetry can take up to
+  // ~65s worst case across all its retries. 12s was firing this "never
+  // acked" warning before a normal, successful BLE ack even had a chance
+  // to complete, making a working ack look broken. Raised with headroom
+  // above that worst case.
+  static const Duration _alertAckTimeout = Duration(seconds: 75);
 
   /// A socket write succeeding is not proof of delivery — only the peer's
   /// own alert_ack is. If none arrives within [_alertAckTimeout], this logs
