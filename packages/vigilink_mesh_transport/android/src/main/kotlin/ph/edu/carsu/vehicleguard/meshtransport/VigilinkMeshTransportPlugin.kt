@@ -1,5 +1,6 @@
 package ph.edu.carsu.vehicleguard.meshtransport
 
+import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
@@ -185,6 +186,47 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
         // queued operation and starting the next gives the BLE stack time
         // to actually finish releasing the previous connection first.
         private const val GATT_QUEUE_GAP_MS = 400L
+
+        // Real testing after the queue fix above still showed "characteristic
+        // not found on peer" and 15s timeouts — not a permanent failure, but
+        // the peer's own GATT server (or the radio link itself) not being
+        // ready yet at the exact moment of one single attempt. A GATT
+        // operation here already has its own 15s cap (BleGattClient), so
+        // retrying a bounded number of times instead of giving up after one
+        // attempt gives real room for that to resolve, without reintroducing
+        // the "hangs forever" failure mode the old Wi-Fi Direct connect()
+        // had before it got its own timeout.
+        private const val GATT_RETRY_GAP_MS = 1_500L
+        private const val GATT_MAX_ATTEMPTS = 4
+    }
+
+    /**
+     * Runs one BLE GATT send attempt, retrying up to [attemptsLeft] times
+     * (with a short gap between attempts) before reporting the final
+     * success/failure to [onFinalResult]. Every failure seen in real testing
+     * so far (status 133, "characteristic not found," 15s timeouts) has
+     * turned out to be transient/timing-related rather than permanent, so
+     * this retries on any failure, not just one specific message.
+     */
+    private fun sendWithRetry(
+        device: BluetoothDevice,
+        payload: ByteArray,
+        attemptsLeft: Int,
+        onFinalResult: (Boolean, String) -> Unit
+    ) {
+        val client = BleGattClient(context)
+        client.listener = object : BleGattClient.Listener {
+            override fun onResult(success: Boolean, detail: String) {
+                if (success || attemptsLeft <= 1) {
+                    onFinalResult(success, detail)
+                    return
+                }
+                mainHandler.postDelayed({
+                    sendWithRetry(device, payload, attemptsLeft - 1, onFinalResult)
+                }, GATT_RETRY_GAP_MS)
+            }
+        }
+        client.send(device, ble.myCurrentToken, payload)
     }
 
     // Serializes every BLE GATT operation (the connection probe AND every
@@ -236,23 +278,19 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             return false
         }
         runSerializedOnAddress(device.address) {
-            val client = BleGattClient(context)
-            client.listener = object : BleGattClient.Listener {
-                override fun onResult(success: Boolean, detail: String) {
-                    if (success) {
-                        handleConnected(endpointId, "VIGILINK User", incoming = false)
-                    } else {
-                        sendEvent(
-                            mapOf(
-                                "event" to "onTransportError",
-                                "message" to "BLE GATT connection attempt to $endpointId failed: $detail"
-                            )
+            sendWithRetry(device, ByteArray(0), GATT_MAX_ATTEMPTS) { success, detail ->
+                if (success) {
+                    handleConnected(endpointId, "VIGILINK User", incoming = false)
+                } else {
+                    sendEvent(
+                        mapOf(
+                            "event" to "onTransportError",
+                            "message" to "BLE GATT connection attempt to $endpointId failed: $detail"
                         )
-                    }
-                    releaseAddressAfterDelay(device.address)
+                    )
                 }
+                releaseAddressAfterDelay(device.address)
             }
-            client.send(device, ble.myCurrentToken, ByteArray(0))
         }
         return true
     }
@@ -270,22 +308,18 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             return
         }
         runSerializedOnAddress(device.address) {
-            val client = BleGattClient(context)
-            client.listener = object : BleGattClient.Listener {
-                override fun onResult(success: Boolean, detail: String) {
-                    if (!success) {
-                        sendEvent(
-                            mapOf(
-                                "event" to "onTransportError",
-                                "message" to "sendBytesPayload to $endpointId failed: $detail"
-                            )
+            sendWithRetry(device, bytes, GATT_MAX_ATTEMPTS) { success, detail ->
+                if (!success) {
+                    sendEvent(
+                        mapOf(
+                            "event" to "onTransportError",
+                            "message" to "sendBytesPayload to $endpointId failed: $detail"
                         )
-                    }
-                    result.success(success)
-                    releaseAddressAfterDelay(device.address)
+                    )
                 }
+                result.success(success)
+                releaseAddressAfterDelay(device.address)
             }
-            client.send(device, ble.myCurrentToken, bytes)
         }
     }
 

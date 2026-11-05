@@ -10,6 +10,8 @@ import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import java.util.UUID
 
 /**
@@ -46,6 +48,7 @@ class BleGattServer(private val context: Context) {
 
     var listener: Listener? = null
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var gattServer: BluetoothGattServer? = null
 
     // One accumulator per currently-connected device address — a GATT
@@ -59,8 +62,21 @@ class BleGattServer(private val context: Context) {
     // connection rather than once per message.
     private val knownSenderTokens = mutableSetOf<String>()
 
+    // addService() is asynchronous — Android confirms registration later via
+    // onServiceAdded, not at the addService() call site. Real-device testing
+    // showed peers seeing "characteristic not found" when they connected and
+    // called discoverServices() before this device's service had actually
+    // finished registering (most likely after a mesh restart, which tears
+    // down and recreates the GATT server). This flag reflects the real,
+    // confirmed state rather than assuming addService() succeeded instantly.
+    @Volatile
+    private var serviceReady = false
+
+    fun isServiceReady(): Boolean = serviceReady
+
     @SuppressLint("MissingPermission")
     fun start(): Boolean {
+        serviceReady = false
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         if (manager == null) {
             listener?.onError("BLUETOOTH_SERVICE unavailable on this device")
@@ -109,6 +125,20 @@ class BleGattServer(private val context: Context) {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 accumulators.remove(device.address)
+            }
+        }
+
+        override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                serviceReady = true
+            } else {
+                mainHandler.post {
+                    listener?.onError(
+                        "BLE GATT server: alert service failed to register (status=$status) — " +
+                            "incoming connections from peers will see \"characteristic not found\" " +
+                            "until this device's mesh restarts"
+                    )
+                }
             }
         }
 

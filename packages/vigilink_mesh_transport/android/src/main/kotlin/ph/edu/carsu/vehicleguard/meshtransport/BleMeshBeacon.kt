@@ -255,6 +255,15 @@ class BleMeshBeacon(private val context: Context) {
     @SuppressLint("MissingPermission")
     private fun startScan() {
         val sc = scanner ?: return
+        // Mirrors advertiseCurrentRole()'s own defensive stop-before-start
+        // just below — without it, a scan left running from before a mesh
+        // restart (the OS can take a moment to actually release it) made
+        // every subsequent startScan() fail with "already started" instead
+        // of just reusing or cleanly replacing the existing scan.
+        try {
+            sc.stopScan(scanCallback)
+        } catch (_: Exception) {
+        }
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
