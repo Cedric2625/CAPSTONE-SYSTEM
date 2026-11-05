@@ -42,6 +42,13 @@ class BleGattClient(private val context: Context) {
         // before writing begins.
         private const val SAFE_CHUNK_BYTES = 20
 
+        // If onMtuChanged never arrives at all (the same class of stalled-
+        // GATT-callback bug that motivated sequencing discoverServices()
+        // after it in the first place), this fallback still moves on to
+        // discoverServices() instead of silently consuming the entire
+        // operation timeout waiting for a callback that may never come.
+        private const val MTU_FALLBACK_MS = 2_000L
+
         // Raised from 15s: real-device testing kept hitting this timeout
         // even with retries, with no onStageInfo milestone (connected /
         // characteristic found) appearing first in some cases — meaning
@@ -124,26 +131,59 @@ class BleGattClient(private val context: Context) {
         listener?.onResult(success, detail)
     }
 
+    // Set once discoverServices() has actually been called, so it's only
+    // ever invoked exactly once per connection (from whichever of
+    // onMtuChanged / the fallback timer gets there first).
+    private var discoverServicesCalled = false
+
+    @SuppressLint("MissingPermission")
+    private fun callDiscoverServices(g: BluetoothGatt) {
+        if (finished || discoverServicesCalled) return
+        discoverServicesCalled = true
+        try {
+            g.discoverServices()
+        } catch (e: Exception) {
+            finish(false, "discoverServices threw: ${e.message}")
+        }
+    }
+
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (finished) return
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                onStageInfo?.invoke("BLE GATT connected to ${g.device.address} — discovering services")
+                onStageInfo?.invoke("BLE GATT connected to ${g.device.address} — negotiating MTU")
+                // discoverServices() used to fire in the SAME tick as
+                // requestMtu() here. Android's GATT stack generally only
+                // handles one outstanding operation per connection at a
+                // time — firing a second one before the first resolves is
+                // a documented real cause of onServicesDiscovered simply
+                // never firing at all (not failing — never calling back),
+                // which is exactly what real-device logs showed: "connected,
+                // discovering services" logged, then nothing until the
+                // whole operation timed out. Now strictly sequenced:
+                // discoverServices() only runs once onMtuChanged reports
+                // back (success OR failure) below. A short fallback timer
+                // covers the case where onMtuChanged itself never fires
+                // either, which this same class of bug could also cause.
                 try {
                     g.requestMtu(517)
                 } catch (_: Exception) {
+                    callDiscoverServices(g)
+                    return
                 }
-                try {
-                    g.discoverServices()
-                } catch (e: Exception) {
-                    finish(false, "discoverServices threw: ${e.message}")
-                }
+                mainHandler.postDelayed({
+                    if (!discoverServicesCalled) {
+                        onStageInfo?.invoke("BLE GATT: MTU negotiation callback never arrived — discovering services anyway")
+                    }
+                    callDiscoverServices(g)
+                }, MTU_FALLBACK_MS)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 if (!finished) finish(false, "disconnected before send completed (status=$status)")
             }
         }
 
+        @SuppressLint("MissingPermission")
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS && mtu > chunkBytes + 3) {
                 // Re-chunk the still-unsent remainder at the larger size —
@@ -154,6 +194,8 @@ class BleGattClient(private val context: Context) {
                     chunkBytes = mtu - 3
                 }
             }
+            onStageInfo?.invoke("BLE GATT: MTU negotiation resolved (status=$status) — discovering services")
+            callDiscoverServices(g)
         }
 
         @SuppressLint("MissingPermission")
