@@ -166,7 +166,22 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             teardownRunnable = null
             gattServer.stop()
             ble.stop()
-            cancelAllInFlightGattClients()
+            // Deliberately NOT cancelling in-flight GATT clients here. This
+            // path fires on routine background hand-off (app backgrounded
+            // to switch screens, take a screenshot, etc.) far more often
+            // than an explicit "Restart Scan" — and ble.stop()/
+            // gattServer.stop() only tear down THIS device's own
+            // advertiser/scanner/GATT-server (the peripheral role); they
+            // never touch an already-open OUTGOING BluetoothGatt connection
+            // a BleGattClient is using to send something, which is a
+            // separate, independent object. Killing it here was cancelling
+            // sends that were never actually threatened by this teardown
+            // and would otherwise have finished naturally — exactly the
+            // kind of send a real-world test (background briefly, come
+            // back) kept interrupting. Only forceRestart() (an explicit,
+            // deliberate "tear down and reconnect right now" action) still
+            // cancels them, since a fresh connectGatt() to the same address
+            // immediately after really can collide with an orphaned one.
             gattQueue.clear()
             gattBusyAddresses.clear()
         }
