@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ (API 31+) draws its own system splash screen via the
+         Splash Screen API, which only accepts a solid background COLOR —
+         it cannot show a full custom image/pattern the way the pre-12
+         `drawable/launch_background.xml` can (an OS-level restriction, not
+         a limitation of this app). This overrides just the background
+         color to the splash artwork's own dominant dark teal, so the
+         brief system splash at least matches instead of defaulting to
+         black; the app icon shown on it is already the real logo (the
+         launcher icon), with no extra configuration needed. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:windowSplashScreenBackground">#FF004E5C</item>
+    </style>
+</resources>

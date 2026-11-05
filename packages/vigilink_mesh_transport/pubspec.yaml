@@ -1,0 +1,27 @@
+name: vigilink_mesh_transport
+description: >
+  App-local Android plugin: ad hoc peer discovery and data transfer using raw
+  BLE advertise/scan and native Wi-Fi Direct (WifiP2pManager) only — no
+  Google Play Services / Nearby Connections involved, so it has no internet
+  dependency of any kind.
+version: 1.0.0
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.6.0 <4.0.0'
+  flutter: '>=3.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: ph.edu.carsu.vehicleguard.meshtransport
+        pluginClass: VigilinkMeshTransportPlugin

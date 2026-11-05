@@ -1,0 +1,43 @@
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+*.g.dart.bak
+flutter_*.log
+hs_err_pid*.log
+replay_pid*.log
+
+# Android — .gradle/ with no leading path so it's excluded at every
+# depth (the plugin package has its own nested one too)
+.gradle/
+android/captures/
+android/gradlew
+android/gradlew.bat
+android/local.properties
+android/key.properties
+**/android/**/GeneratedPluginRegistrant.java
+*.jks
+*.keystore
+
+# Firebase config — contains project identifiers; kept out of version
+# control as a precaution even though Firebase API keys are not
+# traditionally secret (security relies on Firestore rules, not on hiding
+# this file). Each developer should place their own copy locally.
+android/app/google-services.json
+lib/firebase_options.dart
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.lock.bak

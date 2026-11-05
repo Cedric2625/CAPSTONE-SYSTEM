@@ -1,0 +1,30 @@
+group 'ph.edu.carsu.vehicleguard.meshtransport'
+version '1.0'
+
+// No buildscript/classpath block here, deliberately — AGP and the Kotlin
+// Gradle plugin versions come from the app's own root settings.gradle.kts
+// (via Flutter's plugin loader), exactly like every other local/pub Android
+// plugin module in this project. Pinning a separate version here risks a
+// classpath conflict with that root resolution.
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'ph.edu.carsu.vehicleguard.meshtransport'
+    compileSdk 35
+
+    defaultConfig {
+        // Must stay <= the app's own minSdk (29) — raw BLE advertise/scan and
+        // WifiP2pManager are both available well below that floor.
+        minSdkVersion 29
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
