@@ -11,9 +11,10 @@ flutter_*.log
 hs_err_pid*.log
 replay_pid*.log
 
-# Android — .gradle/ with no leading path so it's excluded at every
-# depth (the plugin package has its own nested one too)
+# Android — .gradle/ and .kotlin/ with no leading path so they're
+# excluded at every depth (the plugin package has its own nested ones too)
 .gradle/
+.kotlin/
 android/captures/
 android/gradlew
 android/gradlew.bat

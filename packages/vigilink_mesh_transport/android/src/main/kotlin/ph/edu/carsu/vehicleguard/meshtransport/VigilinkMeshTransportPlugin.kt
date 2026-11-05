@@ -215,12 +215,19 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
         onFinalResult: (Boolean, String) -> Unit
     ) {
         val client = BleGattClient(context)
+        client.onStageInfo = { message -> sendEvent(mapOf("event" to "onTransportInfo", "message" to message)) }
         client.listener = object : BleGattClient.Listener {
             override fun onResult(success: Boolean, detail: String) {
                 if (success || attemptsLeft <= 1) {
                     onFinalResult(success, detail)
                     return
                 }
+                sendEvent(
+                    mapOf(
+                        "event" to "onTransportInfo",
+                        "message" to "BLE GATT attempt failed ($detail) — retrying ($attemptsLeft left)"
+                    )
+                )
                 mainHandler.postDelayed({
                     sendWithRetry(device, payload, attemptsLeft - 1, onFinalResult)
                 }, GATT_RETRY_GAP_MS)
@@ -309,7 +316,14 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
         }
         runSerializedOnAddress(device.address) {
             sendWithRetry(device, bytes, GATT_MAX_ATTEMPTS) { success, detail ->
-                if (!success) {
+                if (success) {
+                    sendEvent(
+                        mapOf(
+                            "event" to "onTransportInfo",
+                            "message" to "sendBytesPayload to $endpointId succeeded: $detail"
+                        )
+                    )
+                } else {
                     sendEvent(
                         mapOf(
                             "event" to "onTransportError",
@@ -361,6 +375,10 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
 
         override fun onError(message: String) {
             sendEvent(mapOf("event" to "onTransportError", "message" to "BLE GATT server: $message"))
+        }
+
+        override fun onInfo(message: String) {
+            sendEvent(mapOf("event" to "onTransportInfo", "message" to message))
         }
     }
 

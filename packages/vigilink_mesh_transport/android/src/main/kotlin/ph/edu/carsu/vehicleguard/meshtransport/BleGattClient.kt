@@ -26,6 +26,15 @@ class BleGattClient(private val context: Context) {
         fun onResult(success: Boolean, detail: String)
     }
 
+    /**
+     * Fired at each GATT stage milestone so System Logs show real progress
+     * ("connected, discovering services" / "characteristic found, sending
+     * N chunk(s)") instead of only a final success/failure line — requested
+     * explicitly so a future failure can be diagnosed from logs alone
+     * instead of guessed at.
+     */
+    var onStageInfo: ((String) -> Unit)? = null
+
     companion object {
         // ATT_MTU defaults to 23 bytes, 3 of which are protocol overhead —
         // 20 is the one chunk size guaranteed to fit without negotiating
@@ -89,6 +98,7 @@ class BleGattClient(private val context: Context) {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (finished) return
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                onStageInfo?.invoke("BLE GATT connected to ${g.device.address} — discovering services")
                 try {
                     g.requestMtu(517)
                 } catch (_: Exception) {
@@ -133,6 +143,9 @@ class BleGattClient(private val context: Context) {
             val fullBytes = chunks.flatMap { it.toList() }
             chunks = fullBytes.chunked(chunkBytes).map { it.toByteArray() }
             nextChunkIndex = 0
+            onStageInfo?.invoke(
+                "BLE GATT alert characteristic found on ${g.device.address} — sending ${chunks.size} chunk(s)"
+            )
             writeNextChunk(g, characteristic)
         }
 
@@ -144,6 +157,7 @@ class BleGattClient(private val context: Context) {
                 return
             }
             if (nextChunkIndex >= chunks.size) {
+                onStageInfo?.invoke("BLE GATT alert write completed to ${g.device.address} (${chunks.size} chunk(s))")
                 finish(true, "sent ${chunks.size} chunk(s)")
                 return
             }

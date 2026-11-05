@@ -188,6 +188,7 @@ class BleMeshBeacon(private val context: Context) {
         lastSeenAt.clear()
         roleByToken.clear()
         deviceByToken.clear()
+        mainHandler.post { listener?.onBleInfo("BLE scan and advertising stopped") }
     }
 
     /** Called whenever this device becomes/stops being a Wi-Fi Direct Group Owner. */
@@ -275,6 +276,7 @@ class BleMeshBeacon(private val context: Context) {
             // getManufacturerSpecificData(MANUFACTURER_ID) in app code,
             // which can't be affected by a buggy hardware filter.
             sc.startScan(emptyList(), settings, scanCallback)
+            mainHandler.post { listener?.onBleInfo("BLE scan started") }
         } catch (_: Exception) {
         }
     }

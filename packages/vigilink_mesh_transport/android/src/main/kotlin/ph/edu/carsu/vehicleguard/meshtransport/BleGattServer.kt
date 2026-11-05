@@ -44,6 +44,9 @@ class BleGattServer(private val context: Context) {
         /** A complete, non-empty framed message was received and decoded. */
         fun onMessageReceived(senderToken: String, payload: ByteArray)
         fun onError(message: String)
+
+        /** Non-error diagnostic info — stage milestones for System Logs. */
+        fun onInfo(message: String) {}
     }
 
     var listener: Listener? = null
@@ -131,6 +134,7 @@ class BleGattServer(private val context: Context) {
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 serviceReady = true
+                mainHandler.post { listener?.onInfo("BLE GATT server: alert service registered and ready") }
             } else {
                 mainHandler.post {
                     listener?.onError(
@@ -177,6 +181,10 @@ class BleGattServer(private val context: Context) {
                 // requestConnectionTo) — not a real alert, so it must not
                 // reach Dart's onPayloadReceived/alert-ingest path at all.
                 if (decoded.payload.isNotEmpty()) {
+                    listener?.onInfo(
+                        "BLE GATT server: received alert payload (${decoded.payload.size} bytes) " +
+                            "from ${decoded.senderToken}"
+                    )
                     listener?.onMessageReceived(decoded.senderToken, decoded.payload)
                 }
             }
