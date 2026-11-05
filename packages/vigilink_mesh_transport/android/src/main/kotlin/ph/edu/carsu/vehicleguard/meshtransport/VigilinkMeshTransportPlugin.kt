@@ -11,21 +11,22 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 
 /**
- * Ties [BleMeshBeacon] (discovery/signaling) and [WifiDirectManager] +
- * [MeshSocketServer]/[MeshSocketClient] (connection + data transfer)
- * together behind the same method/event shape `nearby_mesh_service.dart`
- * already expects from `package:nearby_connections`, so that file's own
- * public API and watchdog logic don't need to change — only what it calls
- * into underneath. See the plan this was built from for the full design.
+ * BLE-TRANSPORT BRANCH (ble-transport-test) — replaces Wi-Fi Direct +
+ * TCP sockets with BLE GATT for both discovery (unchanged, via
+ * [BleMeshBeacon]) and actual alert data transfer (new: [BleGattServer]/
+ * [BleGattClient]). See those classes' doc comments for why: real device
+ * testing on the Wi-Fi Direct branch repeatedly showed a connection
+ * forming and then dying within under a second, during Wi-Fi Direct's own
+ * group-formation negotiation stage — a stage BLE GATT connections don't
+ * have an equivalent of. This is an untested hypothesis, not a confirmed
+ * fix; see Progress.md for the honest status.
  *
- * The endpoint id used everywhere here — in events to Dart, and in
- * `requestConnection`/`sendBytesPayload` calls from Dart — is always the
- * peer's BLE beacon TOKEN (see `BleMeshBeacon`'s class doc for why: a BLE
- * device's advertising address rotates, the token doesn't). There used to
- * be a separate address↔token translation layer here because Dart's
- * endpoint id was the (rotating) address; that was the root cause of a real
- * bug — ghost duplicate "devices" and messages going to a stale, no-longer-
- * valid connection — so it's gone now, not just patched.
+ * The Dart-facing method/event contract is unchanged from the Wi-Fi
+ * Direct branch on purpose, so nothing above this plugin
+ * (`nearby_mesh_service.dart` and everything built on it) needed to
+ * change at all. The endpoint id used everywhere is still the peer's BLE
+ * beacon TOKEN — now also literally the value embedded in every BLE GATT
+ * message's header (see `BleFraming`), not just the advertisement.
  */
 class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
 
@@ -36,10 +37,7 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var ble: BleMeshBeacon
-    private lateinit var wifiDirect: WifiDirectManager
-
-    private var meshSocketServer: MeshSocketServer? = null
-    private var meshSocketClient: MeshSocketClient? = null
+    private lateinit var gattServer: BleGattServer
 
     private var myDisplayName: String = "VIGILINK User"
     private var serviceId: String = ""
@@ -48,7 +46,7 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
         ble = BleMeshBeacon(context).also { it.listener = bleListener }
-        wifiDirect = WifiDirectManager(context).also { it.listener = wifiListener }
+        gattServer = BleGattServer(context).also { it.listener = gattServerListener }
 
         methodChannel = MethodChannel(binding.binaryMessenger, "vigilink_mesh_transport/methods")
         methodChannel.setMethodCallHandler(this)
@@ -82,7 +80,7 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
                 if (force) {
                     forceRestart(result)
                 } else {
-                    result.success(ensureStarted(force = false))
+                    result.success(ensureStarted())
                 }
             }
             "stopAdvertising", "stopDiscovery", "stopAllEndpoints" -> {
@@ -98,37 +96,32 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
                 result.success(requestConnectionTo(id))
             }
             "acceptConnection" -> {
-                // The socket handshake already fully establishes the
-                // connection by the time Dart sees onConnectionInitiated —
-                // there is no separate accept step to perform natively.
+                // Same as the Wi-Fi Direct branch: nothing separate to
+                // accept — a complete incoming GATT write already IS the
+                // connection as far as this transport is concerned.
                 result.success(true)
             }
             "sendBytesPayload" -> {
                 val id = call.argument<String>("endpointId")
                 val bytes = call.argument<ByteArray>("bytes")
-                result.success(if (id != null && bytes != null) sendTo(id, bytes) else false)
+                if (id == null || bytes == null) {
+                    result.success(false)
+                    return
+                }
+                sendTo(id, bytes, result)
             }
             else -> result.notImplemented()
         }
     }
 
-    // Dart's own restart pattern (watchdog refresh, the background
-    // hand-off timer, "Restart Scan") always calls stop-then-immediately-
-    // start as one pair. Actually tearing down and recreating the BLE
-    // radios on every one of those pairs is what was silently throttling
-    // scanning: Android has an undocumented limit on how often an app can
-    // restart BLE scanning before it starts delivering degraded/delayed
-    // results with no error at all — which looks exactly like "Found 0"
-    // forever despite every call reporting success. Real test logs showed
-    // exactly this churn pattern (several full restarts within seconds,
-    // from switching apps during testing). Debouncing the actual teardown
-    // means a stop immediately followed by a start just resumes the
-    // already-running radios untouched; only a stop with no start
-    // within [TEARDOWN_DEBOUNCE_MS] actually tears anything down.
+    // Same debounce reasoning as the Wi-Fi Direct branch — see that
+    // version's doc comment. Routine stop-then-start (the watchdog,
+    // the background hand-off timer) just resumes the already-running
+    // radios; only a genuine "Restart Scan" tears anything down for real.
     private var teardownPending = false
     private var teardownRunnable: Runnable? = null
 
-    private fun ensureStarted(force: Boolean): Boolean {
+    private fun ensureStarted(): Boolean {
         if (isActive) return true
         if (teardownPending) {
             teardownRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -138,59 +131,36 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
             return true
         }
         if (!ble.start()) return false
-        wifiDirect.start()
-        isActive = true
-        return true
+        val serverStarted = gattServer.start()
+        isActive = serverStarted
+        return serverStarted
     }
 
-    /**
-     * A genuine user-requested hard reset (Dart's "Restart Scan", and the
-     * watchdog's 90s stale-radio refresh) always really tears down and
-     * rebuilds — see `NearbyMeshService.restart` for why this must not be
-     * debounced like the routine stop-then-start pattern. Confirmed by real
-     * testing that stopping and restarting BLE in the very same instant is
-     * itself a bug: Android's Bluetooth stack doesn't always finish
-     * releasing the previous advertise/scan session that fast, so the
-     * restart collided with its own shutdown and failed with "already
-     * started" — every single time, forever, since nothing ever recovered.
-     * [HARD_RESET_DELAY_MS] gives the OS a moment to actually finish
-     * stopping before this starts again.
-     */
     private fun forceRestart(result: Result) {
         teardownRunnable?.let { mainHandler.removeCallbacks(it) }
         teardownRunnable = null
         teardownPending = false
         if (isActive) {
-            meshSocketServer?.stop()
-            meshSocketServer = null
-            meshSocketClient?.stop()
-            meshSocketClient = null
-            wifiDirect.stop()
+            gattServer.stop()
             ble.stop()
             isActive = false
         }
         mainHandler.postDelayed({
-            val started = ble.start()
-            if (started) wifiDirect.start()
+            val bleStarted = ble.start()
+            val started = bleStarted && gattServer.start()
             isActive = started
             result.success(started)
         }, HARD_RESET_DELAY_MS)
     }
 
     private fun ensureStopped() {
-        if (!isActive) {
-            return
-        }
+        if (!isActive) return
         isActive = false
         teardownPending = true
         val r = Runnable {
             teardownPending = false
             teardownRunnable = null
-            meshSocketServer?.stop()
-            meshSocketServer = null
-            meshSocketClient?.stop()
-            meshSocketClient = null
-            wifiDirect.stop()
+            gattServer.stop()
             ble.stop()
         }
         teardownRunnable = r
@@ -199,112 +169,75 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
 
     companion object {
         private const val TEARDOWN_DEBOUNCE_MS = 6_000L
-        // 500ms was too short a gap for Android's Bluetooth stack to
-        // reliably finish releasing the previous BLE advertiser slot before
-        // a new one is requested — over many restart cycles in a long real
-        // test session (every "Restart Scan" tap, every watchdog refresh),
-        // a slot that didn't fully release in time can be left orphaned,
-        // and enough of those piling up is what produces "too many
-        // advertisers already running" even though this app only ever
-        // intends to run one at a time. 1500ms gives real margin.
         private const val HARD_RESET_DELAY_MS = 1_500L
     }
 
+    /**
+     * A GATT connect-probe to confirm this peer is actually reachable —
+     * there is no separate "group formation" step the way Wi-Fi Direct
+     * had, so a successful empty-payload send IS the connection check.
+     * Returns quickly (true once the attempt has genuinely started, not
+     * once it resolves) to match what Dart's retry logic already expects
+     * from the Wi-Fi Direct branch — the real result arrives later via
+     * [handleConnected]/[onTransportError], same as before.
+     */
     private fun requestConnectionTo(endpointId: String): Boolean {
-        // There's no reliable way to match this specific BLE-discovered
-        // token to one exact WifiP2pDevice (see
-        // WifiDirectManager.pickConnectTarget) — endpointId still drives
-        // Dart's own jitter/dedup bookkeeping, but the actual Wi-Fi Direct
-        // target is just the best available peer. wifiDirect.isBusy
-        // (checked inside connectTo) already covers "already negotiating or
-        // grouped" — including a Group Owner, which has no need to call
-        // connectTo itself since new peers join it on their own.
-        if (wifiDirect.isBusy) {
-            sendEvent(
-                mapOf(
-                    "event" to "onTransportInfo",
-                    "message" to "requestConnection($endpointId) skipped — already busy/grouped"
-                )
-            )
-            return false
-        }
-        // This used to fail completely silently — no log on either side —
-        // which, combined with a 20s pending-request lockout before any
-        // retry, could leave a request looking "stuck" for up to 50s with
-        // zero visibility into why. The real cause is almost always timing:
-        // Android's own Wi-Fi Direct peer discovery is a separate, slower
-        // process than BLE's, so this device's native peer list can still
-        // be empty even though BLE already found the peer moments ago.
-        val device = wifiDirect.pickConnectTarget(excluding = emptySet())
+        val device = ble.deviceForToken(endpointId)
         if (device == null) {
             sendEvent(
                 mapOf(
                     "event" to "onTransportInfo",
-                    "message" to "requestConnection($endpointId) failed — no Wi-Fi Direct peer discovered yet on this device (native discovery still catching up)"
+                    "message" to "requestConnection($endpointId) failed — BLE hasn't discovered this peer's device yet (or its advertising address has since rotated)"
                 )
             )
             return false
         }
-        wifiDirect.connectTo(device)
+        val client = BleGattClient(context)
+        client.listener = object : BleGattClient.Listener {
+            override fun onResult(success: Boolean, detail: String) {
+                if (success) {
+                    handleConnected(endpointId, "VIGILINK User", incoming = false)
+                } else {
+                    sendEvent(
+                        mapOf(
+                            "event" to "onTransportError",
+                            "message" to "BLE GATT connection attempt to $endpointId failed: $detail"
+                        )
+                    )
+                }
+            }
+        }
+        client.send(device, ble.myCurrentToken, ByteArray(0))
         return true
     }
 
-    /**
-     * "No socket found" used to mean two genuinely different things with
-     * one indistinguishable message: the endpoint was never registered at
-     * all, or it WAS registered and the write itself threw. A real test
-     * showed the identical failure recurring even after a connection had
-     * been stable for seconds, with a retry also failing — which of those
-     * two cases this actually is could not be told from the log alone.
-     * Every path below now reports which one it is, and the current
-     * registered state, so the next failure is diagnosable instead of
-     * another guess.
-     */
-    private fun sendTo(endpointId: String, bytes: ByteArray): Boolean {
-        val server = meshSocketServer
-        val client = meshSocketClient
-
-        if (server != null && server.connectedIds().contains(endpointId)) {
-            if (server.send(endpointId, bytes)) return true
-            reportSendFailure(
-                endpointId,
-                "registered as a server-side socket for this endpoint, but the write itself failed (socket likely broken, not missing)"
-            )
-            return false
-        }
-        if (client != null) {
-            val currentToken = client.currentEndpointToken()
-            if (currentToken == endpointId) {
-                if (client.send(bytes)) return true
-                reportSendFailure(
-                    endpointId,
-                    "this device's client socket matches this endpoint, but the write itself failed (socket likely broken, not missing)"
+    private fun sendTo(endpointId: String, bytes: ByteArray, result: Result) {
+        val device = ble.deviceForToken(endpointId)
+        if (device == null) {
+            sendEvent(
+                mapOf(
+                    "event" to "onTransportError",
+                    "message" to "sendBytesPayload: no BLE device known for endpoint $endpointId (not discovered, or its address rotated since)"
                 )
-                return false
-            }
-            reportSendFailure(
-                endpointId,
-                "this device is acting as a Wi-Fi Direct client, but its only connected peer's token is '${currentToken ?: "none"}', not this one"
             )
-            return false
+            result.success(false)
+            return
         }
-        reportSendFailure(
-            endpointId,
-            "no socket registered for this endpoint at all (server registry=${server?.connectedIds() ?: "no server role"}, client role=${if (client == null) "none" else "present but checked above"})"
-        )
-        return false
-    }
-
-    private fun reportSendFailure(endpointId: String, detail: String) {
-        // The caller also gets `false` back directly from sendTo, so it can
-        // correct its own "sent"/"relayed" bookkeeping instead of only
-        // hearing about this as an untargeted log line.
-        sendEvent(
-            mapOf(
-                "event" to "onTransportError",
-                "message" to "sendBytesPayload: no usable socket for endpoint $endpointId — $detail"
-            )
-        )
+        val client = BleGattClient(context)
+        client.listener = object : BleGattClient.Listener {
+            override fun onResult(success: Boolean, detail: String) {
+                if (!success) {
+                    sendEvent(
+                        mapOf(
+                            "event" to "onTransportError",
+                            "message" to "sendBytesPayload to $endpointId failed: $detail"
+                        )
+                    )
+                }
+                result.success(success)
+            }
+        }
+        client.send(device, ble.myCurrentToken, bytes)
     }
 
     // ── BLE: presence/signaling → Dart's onEndpointFound/onEndpointLost ──
@@ -314,10 +247,6 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
                 mapOf(
                     "event" to "onEndpointFound",
                     "endpointId" to token,
-                    // The real Bluetooth device name if Android exposes one
-                    // for this scan result, otherwise a generic placeholder
-                    // until the socket handshake reveals the app's own
-                    // display name on actual connection.
                     "endpointName" to (deviceName ?: "VIGILINK User"),
                     "serviceId" to serviceId
                 )
@@ -337,73 +266,18 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
         }
     }
 
-    // ── Wi-Fi Direct: group formation → start the right socket role ──
-    private val wifiListener = object : WifiDirectManager.Listener {
-        override fun onGroupFormed(isGroupOwner: Boolean, groupOwnerAddress: String?) {
-            if (isGroupOwner) {
-                ble.updateRole(true)
-                if (meshSocketServer == null) {
-                    meshSocketServer = MeshSocketServer(
-                        myDisplayName,
-                        ble.myCurrentToken,
-                        onConnected = { peerToken, name -> handleConnected(peerToken, name, incoming = true) },
-                        onPayload = { peerToken, bytes -> handlePayload(peerToken, bytes) },
-                        onDisconnected = { peerToken -> handleDisconnected(peerToken) }
-                    ).also { it.start() }
-                }
-            } else {
-                val goAddress = groupOwnerAddress ?: return
-                if (meshSocketClient == null) {
-                    meshSocketClient = MeshSocketClient(
-                        myDisplayName,
-                        ble.myCurrentToken,
-                        onConnected = { peerToken, name -> handleConnected(peerToken, name, incoming = false) },
-                        onPayload = { peerToken, bytes -> handlePayload(peerToken, bytes) },
-                        onDisconnected = { peerToken -> handleDisconnected(peerToken) }
-                    ).also { it.connect(goAddress) }
-                }
-            }
+    // ── BLE GATT server: incoming writes from peers acting as Central ──
+    private val gattServerListener = object : BleGattServer.Listener {
+        override fun onPeerConnected(senderToken: String) {
+            handleConnected(senderToken, "VIGILINK User", incoming = true)
         }
 
-        override fun onGroupLost() {
-            meshSocketServer?.stop()
-            meshSocketServer = null
-            meshSocketClient?.stop()
-            meshSocketClient = null
-            ble.updateRole(false)
+        override fun onMessageReceived(senderToken: String, payload: ByteArray) {
+            handlePayload(senderToken, payload)
         }
 
-        override fun onConnectFailed(deviceAddress: String) {
-            // deviceAddress is the Wi-Fi Direct device's own address — a
-            // different id namespace than the BLE token "endpointId" used
-            // everywhere else, and there's no reliable way to map one to
-            // the other (see WifiDirectManager.pickConnectTarget's doc).
-            // Routing this through onConnectionResult as if it were a
-            // result for a specific BLE-tracked endpoint was a real,
-            // confirmed bug: Dart's discoveredEndpoints lookup (keyed by
-            // BLE token) always missed, producing a misleading "Unknown
-            // Device" error, AND the real pending BLE-token request never
-            // actually got cleared (removing a key that was never there is
-            // a no-op) — delaying recovery by up to the full 20s pending-
-            // timeout instead of being immediate. A plain transport-level
-            // message is the honest representation of what's actually
-            // known here.
-            sendEvent(
-                mapOf(
-                    "event" to "onTransportError",
-                    "message" to "Wi-Fi Direct connection attempt to $deviceAddress failed"
-                )
-            )
-        }
-
-        override fun onWifiDirectError(message: String) {
-            // "busy" just means a connect/discover attempt overlapped with
-            // one already in flight or with an existing group — expected
-            // and harmless while connecting/connected, not something the
-            // user needs to see as an error toast. Still worth keeping out
-            // of the error channel entirely rather than spamming it.
-            if (message.contains("busy", ignoreCase = true)) return
-            sendEvent(mapOf("event" to "onTransportError", "message" to message))
+        override fun onError(message: String) {
+            sendEvent(mapOf("event" to "onTransportError", "message" to "BLE GATT server: $message"))
         }
     }
 
@@ -421,10 +295,6 @@ class VigilinkMeshTransportPlugin : FlutterPlugin, MethodCallHandler {
 
     private fun handlePayload(peerToken: String, bytes: ByteArray) {
         sendEvent(mapOf("event" to "onPayloadReceived", "endpointId" to peerToken, "bytes" to bytes))
-    }
-
-    private fun handleDisconnected(peerToken: String) {
-        sendEvent(mapOf("event" to "onDisconnected", "endpointId" to peerToken))
     }
 
     private fun sendEvent(map: Map<String, Any?>) {

@@ -7808,3 +7808,96 @@ specific out-of-range chain test (A reports near B only; B then moves to
 where C is; confirm C receives it once B reconnects) to verify the
 store-carry-forward handoff this fix targets.
 
+
+## Real multi-phone testing session (2026-11-05): six confirmed Wi-Fi Direct
+## transport bugs fixed, then a BLE GATT alternative branch
+
+Extended real-device testing across four phone combinations (Techno Spark
+10 Pro, Oppo A5 Pro, Redmi, Samsung A06 5G) surfaced and fixed six distinct,
+evidence-based bugs in the Wi-Fi Direct transport, each confirmed from
+actual System Logs before being fixed, not guessed:
+
+1. **BLE identity split on Group-Owner role change** — `BleMeshBeacon`
+   used to regenerate its token when becoming GO, splitting one physical
+   peer into two identities. Fixed: token is now set once and never
+   regenerated; only the role byte changes.
+2. **BLE identity split across the foreground/background hand-off** — the
+   foreground app and the background service each run a separate Flutter
+   engine/native plugin instance, each generating its own random token.
+   Fixed: the token is now persisted via `SharedPreferences` and passed
+   into native on every start.
+3. **False "delivered" reporting** — `sendBytesPayload` always told Dart
+   it succeeded regardless of outcome. Fixed: native now returns a real
+   boolean, and an application-level delivery acknowledgment
+   (`alert_ack`, sent only after the receiver's `db.upsertAlert`
+   succeeds) replaces "wrote to a socket" with "the peer actually stored
+   it" as the definition of "relayed."
+4. **Dead sockets left registered forever** — a failed write used to
+   leave a broken socket in the registry, so every retry hit the same
+   dead connection. Fixed in both `MeshSocketServer.send` and
+   `MeshSocketClient.send`/`stop` — a failed write or a lost group now
+   tears the socket down and reports a real disconnect immediately.
+5. **Wi-Fi Direct connect() could hang forever with isBusy stuck true** —
+   no timeout existed for a negotiation that never resolved either way.
+   Fixed with a timeout (tuned from 15s to 60s after a real test showed
+   15s was itself cancelling connections before a human could respond to
+   the system "Invitation to connect" dialog).
+6. **A connect failure was reported under the wrong id namespace** — Wi-Fi
+   Direct's own device address was routed through the BLE-token-keyed
+   `onConnectionResult`, producing a misleading "Unknown Device" error and
+   never actually clearing the real pending request. Fixed: reported as a
+   plain transport message instead.
+
+**After all six fixes**, real-device testing still showed a Wi-Fi Direct
+connection forming and then dying within the same second, repeatedly,
+across every phone pairing tested — including with a Wi-Fi high-performance
+lock added specifically to rule out Android power-saving as the cause
+(ruled out: sub-one-second death is too fast for a power-save timer). A
+direct, code-verified audit (checking every `removeGroup`/`cancelConnect`
+call site, callback ordering, the grace-period timing, and confirming the
+disconnect signal originates from Android's own
+`WIFI_P2P_CONNECTION_CHANGED_ACTION` broadcast, not from this app's code)
+found no remaining app-level cause. Logs also directly showed the two
+phones' own Android stacks disagreeing about the connection state (one
+reporting "busy/grouped," the other "no peer discovered"). Conclusion:
+this is Android's own Wi-Fi Direct negotiation failing at the OS/radio
+level on the available test hardware — a documented, real-world
+characteristic of `WifiP2pManager`, not a defect in this app's code.
+
+### `ble-transport-test` branch: BLE GATT instead of Wi-Fi Direct
+
+Given the above, started a new git branch replacing the Wi-Fi Direct/TCP
+data-transport layer with BLE GATT — keeping `BleMeshBeacon` (advertise/
+scan discovery, unchanged) but using `BluetoothGattServer`/`BluetoothGatt`
+(new: `BleGattServer.kt`, `BleGattClient.kt`, `BleFraming.kt`) for the
+actual connection and alert transfer, instead of Wi-Fi Direct's group
+formation + TCP sockets.
+
+**Why this might fare better, as a reasoned hypothesis, not a confirmed
+fix**: the specific failure above happens during Wi-Fi Direct's group-
+formation negotiation stage — a multi-step process BLE GATT connections
+have no equivalent of. A BLE Central either connects to a Peripheral's
+GATT server or it doesn't; there's no separate negotiation stage to die
+mid-way through. Every device now runs both roles simultaneously (GATT
+server for receiving, ad hoc GATT client connections for sending) rather
+than Wi-Fi Direct's exclusive Group-Owner-or-Client assignment.
+
+The Dart-facing method/event contract (`vigilink_mesh_transport.dart`'s
+MethodChannel/EventChannel shape) is unchanged on purpose, so nothing
+above the transport — `nearby_mesh_service.dart`, `alert_ingest.dart`,
+`app_state.dart`, hop count/TTL/dedup/the ack system — needed to change
+at all.
+
+**Verified**: `flutter analyze` — 0 issues. `flutter test` — 15 passing
+(both Dart-only, unaffected by native-only changes). `flutter build apk
+--release` — succeeded (79.1MB), confirming the new Kotlin BLE GATT code
+compiles correctly. **Not yet tested on real hardware at all** — whether
+BLE GATT actually holds a stable connection where Wi-Fi Direct didn't is
+completely unverified and must not be assumed from the reasoning above
+alone.
+
+The original Wi-Fi Direct implementation (`WifiDirectManager.kt`,
+`MeshSocketServer.kt`, `MeshSocketClient.kt`, `MeshSocketIO.kt`) is
+preserved intact and unmodified on the `main` branch, and the source files
+themselves are still present (just unreferenced by the plugin) on this
+branch too, per explicit instruction not to delete the fallback.

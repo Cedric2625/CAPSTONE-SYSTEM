@@ -2,6 +2,7 @@ package ph.edu.carsu.vehicleguard.meshtransport
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -112,9 +113,17 @@ class BleMeshBeacon(private val context: Context) {
     private val lastSeenAt = mutableMapOf<String, Long>()
     private val roleByToken = mutableMapOf<String, Boolean>()
 
+    // BLE-transport branch addition: a GATT connection needs an actual
+    // BluetoothDevice object to connect to, which a pure presence beacon
+    // never needed before. Updated on every scan result (not just
+    // first-seen) so it always reflects this peer's current advertising
+    // address even after Android rotates it — stale otherwise.
+    private val deviceByToken = mutableMapOf<String, BluetoothDevice>()
+
     private var sweepRunnable: Runnable? = null
 
     fun roleOf(token: String): Boolean = roleByToken[token] ?: false
+    fun deviceForToken(token: String): BluetoothDevice? = deviceByToken[token]
     val myCurrentToken: String get() = myToken
 
     /**
@@ -178,6 +187,7 @@ class BleMeshBeacon(private val context: Context) {
         sweepRunnable = null
         lastSeenAt.clear()
         roleByToken.clear()
+        deviceByToken.clear()
     }
 
     /** Called whenever this device becomes/stops being a Wi-Fi Direct Group Owner. */
@@ -314,6 +324,7 @@ class BleMeshBeacon(private val context: Context) {
             val wasKnown = lastSeenAt.containsKey(token)
             lastSeenAt[token] = now
             roleByToken[token] = isGo
+            deviceByToken[token] = result.device
 
             if (!wasKnown) {
                 // The real VIGILINK display name travels in the
@@ -351,6 +362,7 @@ class BleMeshBeacon(private val context: Context) {
                 for (token in lost) {
                     lastSeenAt.remove(token)
                     roleByToken.remove(token)
+                    deviceByToken.remove(token)
                     listener?.onBeaconLost(token)
                 }
                 mainHandler.postDelayed(this, SWEEP_INTERVAL_MS)
