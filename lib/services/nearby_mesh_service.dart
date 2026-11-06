@@ -409,7 +409,18 @@ class NearbyMeshService {
     _pendingConnections.add(id);
     _log('Requesting connection to "$name" ($id)…');
     // A request that never reports back must not block retries forever.
-    Timer(const Duration(seconds: 20), () => _pendingConnections.remove(id));
+    // Was 20s, but a single BLE GATT connection probe can now legitimately
+    // take up to ~190s across all its retries (VigilinkMeshTransportPlugin's
+    // GATT_MAX_ATTEMPTS/GATT_RETRY_GAP_MS, each attempt's own 30s timeout) -
+    // the 20s guard was clearing while a probe was still genuinely in
+    // flight, letting a SECOND overlapping probe launch to the same peer.
+    // If both eventually succeeded, onPeerConnected fired twice for one
+    // peer, each time re-running the full store-carry-forward catch-up -
+    // confirmed on a real device as repeated "Duplicate alert ... ignored"
+    // log spam and a manual Force Relay getting stuck behind that backlog
+    // in the per-address send queue. Kept with headroom above that ~190s
+    // worst case.
+    Timer(const Duration(seconds: 210), () => _pendingConnections.remove(id));
     // Auto-connect on discovery — matches the manuscript's "temporary
     // peer-to-peer mesh" with no manual pairing step.
     _nearby

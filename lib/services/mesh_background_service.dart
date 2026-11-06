@@ -48,6 +48,15 @@ class MeshBackgroundTaskHandler extends TaskHandler {
   bool _meshOwned = false;
   String? _currentUserId;
 
+  // The BLE transport has no persistent "connected" state, so
+  // onPeerConnected can fire more than once for the same peer (an
+  // outgoing probe and a separate incoming write each succeeding, or an
+  // overlapping second probe that was never supposed to launch). Mirrors
+  // the same guard in app_state.dart's onPeerConnected — without it, a
+  // real 3-device test showed the catch-up resending the same alert to
+  // the same peer repeatedly, clogging the per-address BLE send queue.
+  final Set<String> _caughtUpEndpoints = {};
+
   Future<void> _addLog(String tag, String message, LogType type) =>
       _db.addSystemLog(SystemLog(tag: tag, message: message, type: type));
 
@@ -101,6 +110,10 @@ class MeshBackgroundTaskHandler extends TaskHandler {
     };
 
     _mesh.onPeerConnected = (endpointId, name) {
+      // Only catch up once per peer for this isolate's lifetime — see
+      // _caughtUpEndpoints' doc comment for why onPeerConnected can
+      // otherwise fire repeatedly for the same already-connected peer.
+      if (!_caughtUpEndpoints.add(endpointId)) return;
       // Store-carry-forward: catch this newly-joined peer up on every
       // active alert this device currently has stored — read straight from
       // SQLite rather than an in-memory list, so it reflects alerts stored

@@ -412,6 +412,18 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _pausedAt = null;
     if (_meshHandedOff) {
       await _reclaimMeshFromBackground();
+    } else {
+      // Reload from SQLite even when the mesh never actually handed off to
+      // the background isolate. Confirmed on a real device: a lock-screen
+      // notification for a mesh-received alert fired (proving
+      // ingestMeshTheftAlert ran and stored it), but the alert never
+      // appeared on this device's own Alert History afterward — the exact
+      // "the DB has it, this isolate's in-memory state doesn't" gap
+      // _reclaimMeshFromBackground already closes for a genuine hand-off.
+      // This closes it unconditionally too, since it's the same cheap call
+      // _loadUserData already makes on every login/launch.
+      await _loadUserData();
+      notifyListeners();
     }
     _syncSoonIfOnline();
     _startAlertFeed();
@@ -469,6 +481,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _mesh.onPeerConnected = (endpointId, name) {
       final id = 'real-$endpointId';
       final idx = nodes.indexWhere((n) => n.id == id);
+      // The BLE transport has no persistent "connected" state — every
+      // successful exchange (an outgoing probe succeeding, a separate
+      // incoming write succeeding, a 2nd overlapping probe that was never
+      // supposed to launch but did, etc.) can independently report
+      // onPeerConnected for a peer that's already connected. Confirmed on
+      // a real 3-device test: this fired repeatedly for the same peer,
+      // re-running the full store-carry-forward catch-up every time -
+      // visible as the SAME alert being re-sent over and over (the
+      // receiving end correctly deduped it each time, logged as "Duplicate
+      // alert ... ignored", but the repeated sends themselves clogged the
+      // per-address BLE send queue badly enough to delay a manual Force
+      // Relay queued behind that backlog). Only treat this as a genuinely
+      // NEW connection - worth re-logging, re-notifying, and catching up -
+      // if the node wasn't already marked online.
+      final alreadyConnected = idx >= 0 && nodes[idx].isOnline;
       if (idx >= 0) {
         nodes[idx].isOnline = true;
         nodes[idx].relayStatus = RelayStatus.received;
@@ -488,6 +515,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         );
         nodes.add(node);
         _db.upsertNode(node);
+      }
+      if (alreadyConnected) {
+        notifyListeners();
+        return;
       }
       _addLog('NODE', '✅ Connected to real device: $name', LogType.ok);
       _addNotif(
