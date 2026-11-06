@@ -197,6 +197,15 @@ Future<TheftAlert?> ingestMeshTheftAlert(
       // above), so the count climbs by exactly one per real hop traveled.
       // Capped at alertMeshHops total hops to prevent infinite relay loops.
       if (myHop < alertMeshHops) {
+        // Computed BEFORE the broadcast specifically so a 3-device
+        // multi-hop test can distinguish "there was nobody else connected
+        // yet to relay to" from "there was a peer, but forwarding to it
+        // failed" — previously this whole block logged nothing in either
+        // case, which made a real multi-hop failure indistinguishable from
+        // the alert simply never attempting to relay at all.
+        final candidates = NearbyMeshService.instance.connectedEndpoints.keys
+            .where((id) => id != fromEndpointId)
+            .toList();
         final forwardMsg = Map<String, dynamic>.from(msg)
           ..['hopCount'] = myHop;
         final sentTo = await NearbyMeshService.instance
@@ -206,6 +215,16 @@ Future<TheftAlert?> ingestMeshTheftAlert(
               'RELAY',
               'Forwarded ${alert.plate} alert to ${sentTo.length} other connected peer(s) (will show as hop ${myHop + 1} there)',
               LogType.relay);
+        } else if (candidates.isEmpty) {
+          await logSink(
+              'RELAY',
+              'No other connected peer to relay ${alert.plate} to yet — will relay automatically once another device connects (store-carry-forward)',
+              LogType.info);
+        } else {
+          await logSink(
+              'RELAY',
+              'Failed to relay ${alert.plate} alert to ${candidates.length} connected peer(s) — see the sendBytesPayload error above',
+              LogType.err);
         }
       }
       return alert;

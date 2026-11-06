@@ -107,9 +107,22 @@ class MeshBackgroundTaskHandler extends TaskHandler {
       // by either isolate across the hand-off.
       unawaited(() async {
         final all = await _db.getAllAlerts();
-        final active = all.where((a) => a.status == AlertStatus.active);
+        final active = all.where((a) => a.status == AlertStatus.active).toList();
+        if (active.isNotEmpty) {
+          await _addLog(
+              'RELAY',
+              'Catching up "$name" on ${active.length} active alert(s) this device already has (store-carry-forward)',
+              LogType.relay);
+        }
         for (final a in active) {
-          unawaited(_mesh.sendTo(endpointId, alertWireMessage(a)));
+          unawaited(_mesh.sendTo(endpointId, alertWireMessage(a)).then((ok) {
+            if (!ok) {
+              _addLog(
+                  'RELAY',
+                  'Catch-up: failed to send ${a.plate} alert to newly-connected "$name"',
+                  LogType.err);
+            }
+          }));
         }
       }());
     };

@@ -498,10 +498,33 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
       // Store-carry-forward: catch this newly-joined peer up on any alerts
       // this device currently has active, so late arrivals aren't missed.
+      // Previously completely silent (fire-and-forget with no logging at
+      // all) — a real-device 3-phone multi-hop test showed the middle
+      // device connecting to the 3rd device WITHOUT the alert ever
+      // reaching it, and there was no way to tell from the logs whether
+      // this catch-up path even ran, let alone whether it succeeded.
       final activeMine =
           _alerts.where((a) => a.status == AlertStatus.active).toList();
+      if (activeMine.isNotEmpty) {
+        _addLog(
+            'RELAY',
+            'Catching up "$name" on ${activeMine.length} active alert(s) this device already has (store-carry-forward)',
+            LogType.relay);
+      }
       for (final a in activeMine) {
-        unawaited(_mesh.sendTo(endpointId, alertWireMessage(a)));
+        unawaited(_mesh.sendTo(endpointId, alertWireMessage(a)).then((ok) {
+          if (ok) {
+            _addLog(
+                'RELAY',
+                'Catch-up: sent ${a.plate} alert to newly-connected "$name"',
+                LogType.relay);
+          } else {
+            _addLog(
+                'RELAY',
+                'Catch-up: failed to send ${a.plate} alert to newly-connected "$name"',
+                LogType.err);
+          }
+        }));
       }
     };
 
