@@ -352,7 +352,30 @@ class AlertReceivedScreen extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
+            // Manual safety-net alongside the automatic store-carry-forward
+            // relay above — lets a user explicitly re-attempt sending this
+            // alert to whoever is currently connected, without waiting on
+            // the automatic path. Only meaningful for a real mesh delivery;
+            // an alert that arrived over the internet has no relay chain
+            // here to manually push further.
+            if (!viaInternet)
+              OutlineButton2(
+                  label: '🔁 FORCE RELAY NOW',
+                  onTap: () async {
+                    final appState = context.read<AppState>();
+                    final sentTo = await appState.forceRelayAlert(alert.id);
+                    if (!context.mounted) return;
+                    final message = sentTo == null
+                        ? 'Alert not found.'
+                        : sentTo == 0
+                            ? 'No connected devices right now — it will relay automatically once one connects.'
+                            : 'Manually relayed to $sentTo connected device(s). See System Logs for details.';
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text(message)));
+                  },
+                  dark: true),
+            if (!viaInternet) const SizedBox(height: 10),
             // Only someone who ISN'T the owner, and only while the vehicle is
             // still missing — the owner has Update Status instead, and a
             // sighting of an already-recovered vehicle is moot.

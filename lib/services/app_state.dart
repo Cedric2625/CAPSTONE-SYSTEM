@@ -2597,7 +2597,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     return alert;
   }
 
-  Future<void> _broadcastAlertReal(TheftAlert alert) async {
+  /// Returns the set of endpoint ids the write actually succeeded to (NOT
+  /// confirmed delivery — see the comment below) so [forceRelayAlert] can
+  /// report back how many peers were reached.
+  Future<Set<String>> _broadcastAlertReal(TheftAlert alert) async {
     final stopwatch = Stopwatch()..start();
     final message = alertWireMessage(alert);
 
@@ -2609,7 +2612,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       alertDelay = 0;
       transmissionRate = 0;
       notifyListeners();
-      return;
+      return {};
     }
 
     final sentTo = await _mesh.broadcast(message);
@@ -2650,6 +2653,32 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     alertDelay = stopwatch.elapsedMilliseconds;
     transmissionRate = 100;
     notifyListeners();
+    return sentTo;
+  }
+
+  /// Manual safety-net relay, in addition to the automatic store-carry-
+  /// forward relay that already fires the instant an alert is first
+  /// received or a new peer connects. Lets a user explicitly re-attempt
+  /// sending an alert they already have to whoever is currently connected
+  /// — e.g. if the automatic relay to a specific nearby device hasn't
+  /// happened yet. Reuses the exact same send/ack-tracking/logging path as
+  /// a fresh report (`_broadcastAlertReal`) rather than a second
+  /// implementation, so it's held to the same "write succeeded ≠ confirmed
+  /// delivered" honesty the automatic path already has.
+  ///
+  /// Returns the number of currently-connected peers the write succeeded
+  /// to, or null if no alert with [alertId] is known on this device.
+  Future<int?> forceRelayAlert(String alertId) async {
+    final idx = _alerts.indexWhere((a) => a.id == alertId);
+    if (idx == -1) return null;
+    final alert = _alerts[idx];
+    await _addLog(
+        'RELAY',
+        '🔁 Manual force-relay requested for ${alert.plate} alert '
+            '(${alert.id})',
+        LogType.relay);
+    final sentTo = await _broadcastAlertReal(alert);
+    return sentTo.length;
   }
 
   // 12s was calibrated for the old TCP-socket transport, where an ack went
