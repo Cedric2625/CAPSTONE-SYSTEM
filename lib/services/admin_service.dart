@@ -328,6 +328,22 @@ class AdminService {
         await _auth.signOut();
         return 'This account does not have admin access.';
       }
+      // Backfills a missing createdAt (shows as "—" in the Accounts table)
+      // for THIS admin account specifically, the moment it signs in here.
+      // Mirrors AppState.init()'s same backfill for vehicle-owner accounts
+      // on the phone app — but this admin account never touches that code
+      // path at all (see this file's own top-of-file comment: deliberately
+      // independent of AppState, and an admin account has no reason to
+      // ever open the phone app), so without this, an admin's own account
+      // could never self-heal. cred.user!.metadata.creationTime is only
+      // ever available for the CURRENTLY signed-in session, which is
+      // exactly what this is.
+      if (doc.data()?['createdAt'] == null &&
+          cred.user!.metadata.creationTime != null) {
+        unawaited(_firestore.collection('users').doc(cred.user!.uid).set({
+          'createdAt': cred.user!.metadata.creationTime!.toIso8601String(),
+        }, SetOptions(merge: true)));
+      }
       return null;
     } catch (_) {
       // Signed in but couldn't confirm admin access (e.g. offline right at
