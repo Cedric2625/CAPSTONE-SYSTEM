@@ -313,26 +313,57 @@ Future<TheftAlert?> ingestInternetAlert(
 
     final known = await db.getAlertById(id);
     if (known != null) {
+      var changed = false;
+      // Photos never travel over the mesh (too large — see
+      // alertWireMessage), so a device that received this alert via mesh
+      // only has known.photos empty, even once the Firestore document
+      // (read right here) has the real photos — whoever first got online
+      // (the reporter, or any relay in the chain) already uploaded them.
+      // This must NOT be gated behind "status is newer" below: the alert
+      // staying `active` all the way from mesh-receipt through to this
+      // device coming back online is the COMMON case, and the old code's
+      // unconditional early-return on "status not newer" was silently
+      // discarding this exact backfill every single time it mattered —
+      // the Alert Received screen's own "will appear here once this
+      // device is back online" promise was never actually being kept.
+      if (known.photos.isEmpty) {
+        final photos = (d['photos'] as String? ?? '')
+            .split(',')
+            .where((s) => s.isNotEmpty)
+            .toList();
+        if (photos.isNotEmpty) {
+          known.photos = photos;
+          changed = true;
+          await logSink(
+              'CLOUD',
+              'Photo evidence for ${known.plate} synced now that this device is back online',
+              LogType.relay);
+        }
+      }
       // Already have it (usually via the mesh) — only apply a newer status,
       // e.g. the owner marked it recovered.
-      if (statusIdx <= known.status.index) return null;
-      known.status = AlertStatus.values[statusIdx];
-      known.recoveryRemarks =
-          d['recoveryRemarks'] as String? ?? known.recoveryRemarks;
-      final recoveryPhotos = (d['recoveryPhotos'] as String? ?? '')
-          .split(',')
-          .where((s) => s.isNotEmpty)
-          .toList();
-      if (recoveryPhotos.isNotEmpty) {
-        known.recoveryPhotos = recoveryPhotos;
+      if (statusIdx > known.status.index) {
+        known.status = AlertStatus.values[statusIdx];
+        known.recoveryRemarks =
+            d['recoveryRemarks'] as String? ?? known.recoveryRemarks;
+        final recoveryPhotos = (d['recoveryPhotos'] as String? ?? '')
+            .split(',')
+            .where((s) => s.isNotEmpty)
+            .toList();
+        if (recoveryPhotos.isNotEmpty) {
+          known.recoveryPhotos = recoveryPhotos;
+        }
+        changed = true;
+        await logSink(
+            'CLOUD',
+            'Status update received for ${known.plate}: ${known.statusLabel}',
+            LogType.relay);
+        await notifSink('✅ Vehicle Status Updated',
+            '${known.plate} is now ${known.statusLabel}.',
+            NotifType.recovered);
       }
+      if (!changed) return null;
       await db.upsertAlert(known, synced: true);
-      await logSink(
-          'CLOUD',
-          'Status update received for ${known.plate}: ${known.statusLabel}',
-          LogType.relay);
-      await notifSink('✅ Vehicle Status Updated',
-          '${known.plate} is now ${known.statusLabel}.', NotifType.recovered);
       return known;
     }
 
