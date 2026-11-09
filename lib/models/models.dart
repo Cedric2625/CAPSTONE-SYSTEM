@@ -59,8 +59,14 @@ class UserModel {
   final String initials;
 
   /// When this account was created. Null for an account that existed before
-  /// this field was added — there's no way to recover that date after the
-  /// fact, so the Admin Dashboard shows those as "—" rather than guessing.
+  /// this field was added, or one whose owner hasn't signed back in since —
+  /// the Admin Dashboard shows those as "—" rather than guessing. Not
+  /// permanently unrecoverable, though: AppState.init() backfills it from
+  /// Firebase Auth's own `metadata.creationTime` the next time that
+  /// specific account signs in (that value is only ever visible to the
+  /// account's own session, never readable for another user — not even by
+  /// an admin — which is why this can't be fixed from the Admin Dashboard
+  /// itself).
   final DateTime? createdAt;
 
   UserModel({

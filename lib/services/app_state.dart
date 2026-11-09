@@ -233,6 +233,31 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
               deviceId: 'DEV-${_rng.nextInt(900) + 100}',
               createdAt: fbUser.metadata.creationTime,
             );
+        // Backfills a legacy account's missing createdAt (shows as "—" on
+        // the Admin Dashboard) the moment it next signs in. The `cached ??`
+        // branch above only sets createdAt for a BRAND NEW local record —
+        // an account that already had a cached profile (even with
+        // createdAt null, e.g. one registered before this field existed)
+        // never got a second chance to pick it up. fbUser.metadata
+        // .creationTime is only ever available for the CURRENTLY signed-in
+        // user's own session (not readable for other accounts, even by an
+        // admin), so this is the only place this can self-heal from.
+        if (cached != null &&
+            cached.createdAt == null &&
+            fbUser.metadata.creationTime != null) {
+          final backfilled = UserModel(
+            id: cached.id,
+            name: cached.name,
+            email: cached.email,
+            phone: cached.phone,
+            role: cached.role,
+            deviceId: cached.deviceId,
+            createdAt: fbUser.metadata.creationTime,
+          );
+          currentUser = backfilled;
+          await _db.upsertUser(backfilled);
+          unawaited(_firebaseSync.upsertUserProfile(backfilled));
+        }
         await _loadUserData();
         await _loadProfilePhoto(currentUser!.id);
       }
