@@ -1,8 +1,9 @@
 # 🛡️ VehicleGuard — Real-Time Vehicle Theft Monitoring & Alert System
 
-A Flutter mobile app for real-time vehicle theft detection, alert dissemination via
-simulated Ad Hoc Networks (MANET/VANET), and centralized monitoring — built for
-Butuan City, Philippines (Capstone Project, Caraga State University).
+A Flutter mobile app for real-time vehicle theft detection, alert dissemination via a
+real, zero-internet Bluetooth Low Energy ad hoc mesh (MANET/VANET), and centralized
+monitoring — built for Butuan City, Philippines (Capstone Project, Caraga State
+University).
 
 ---
 
@@ -108,9 +109,17 @@ lib/
 │   └── models.dart                    ← UserModel, VehicleModel, TheftAlert,
 │                                        AdHocNode, NotifItem, SystemLog, etc.
 ├── services/
-│   └── app_state.dart                 ← ChangeNotifier — all business logic,
-│                                        auth, vehicle CRUD, alert broadcasting,
-│                                        ad hoc simulation, logging
+│   ├── app_state.dart                 ← ChangeNotifier — all business logic,
+│   │                                    auth, vehicle CRUD, alert broadcasting,
+│   │                                    foreground mesh ownership, logging
+│   ├── nearby_mesh_service.dart       ← Dart-facing mesh API (wraps the real
+│   │                                    BLE transport plugin)
+│   ├── alert_ingest.dart              ← shared, portable alert/sighting ingest —
+│   │                                    dedup, hop-count, relay — used by BOTH
+│   │                                    AppState and the background service
+│   └── mesh_background_service.dart   ← foreground-service TaskHandler: keeps
+│                                        the mesh + Firestore feeds alive while
+│                                        the app is backgrounded
 ├── utils/
 │   ├── app_theme.dart                 ← AppColors, AppTheme
 │   ├── validators.dart                ← shared mobile-number check
@@ -136,6 +145,10 @@ lib/
 lib/widgets/document_photo.dart        ← shared photo card + camera/gallery helper
 lib/admin_main.dart + lib/screens/admin/  ← web Admin Portal (dashboard, accounts,
                                              vehicles, live activity/map, shared widgets)
+
+packages/vigilink_mesh_transport/      ← local Flutter plugin: the real BLE ad hoc
+                                          mesh (Dart API + native Kotlin GATT
+                                          server/client, discovery beacon, framing)
 ```
 
 ---
@@ -152,25 +165,52 @@ lib/admin_main.dart + lib/screens/admin/  ← web Admin Portal (dashboard, accou
 | `intl` | Date/time formatting |
 | `sqflite` | Local offline storage |
 | `firebase_auth` / `cloud_firestore` | Accounts, cloud sync, internet alert + sighting delivery |
-| `nearby_connections` | Real BLE / Wi-Fi Direct ad hoc mesh |
+| `vigilink_mesh_transport` (local plugin, `packages/vigilink_mesh_transport/`) | Real BLE ad hoc mesh — discovery + data transfer, zero internet dependency |
+| `flutter_foreground_task` | Keeps the mesh and the Firestore alert feed running in the background (Home/Back press, Activity destruction) |
 | `shared_preferences` | Small local settings |
 
 ---
 
-## 📡 Ad Hoc Network Simulation
+## 📡 Ad Hoc Network — real BLE mesh, not simulated
 
-Since actual Wi-Fi Direct / BLE APIs require physical devices, the ad hoc relay
-is **software-simulated** in `AppState._simulateBroadcast()`:
+The ad hoc relay is a **real, working** Bluetooth Low Energy mesh — no Play Services,
+no internet dependency, confirmed on physical multi-device tests including true
+multi-hop relay (a device out of the reporter's own range still receives the alert
+via a device in between). It lives in the local Flutter plugin
+`packages/vigilink_mesh_transport/`, not in `AppState`.
 
-1. Theft alert generated → alert packet created (vehicle ID, GPS, timestamp)
-2. Online nodes iterated with staggered `Timer` delays (1.2s per hop)
-3. Each node's `relayStatus` updates: `pending → relaying → received`
-4. Hop count increments, alert relayed to next node
-5. System log entry + push notification added per relay
+An earlier implementation used Android's native Wi-Fi Direct for the data-transfer
+leg; that was abandoned after real-device testing showed Android's own Wi-Fi Direct
+group-formation negotiation failing at the OS/radio level on the test hardware. The
+current transport is BLE GATT end to end:
 
-To integrate **real** BLE/Wi-Fi Direct in a future version:
-- Android: use `flutter_nearby_connections` or `nearby_connections` package
-- iOS: use `MultipeerConnectivity` via a platform channel
+1. Every device runs **both** roles at once — a `BluetoothGattServer` (peripheral,
+   for receiving) and, per send, a fresh `BluetoothGatt` central connection (for
+   sending) — so there's no "group owner" negotiation step at all.
+2. Presence/discovery is a separate, lightweight BLE advertise/scan beacon
+   (`BleMeshBeacon`) — it never carries alert data, only "a VIGILINK node is nearby."
+3. A theft alert is framed (`BleFraming`), sent as one or more GATT characteristic
+   writes, and acknowledged by the receiver (`alert_ack`) so a successful radio write
+   is never confused with confirmed delivery.
+4. `hopCount` counts **up** from 0 at the original reporter, +1 per real device that
+   relays it, capped at 5 hops to prevent infinite relay loops. Store-carry-forward
+   means a device doesn't need to be connected to everyone at once — it relays
+   automatically the next time it connects to a new peer, even much later. A manual
+   **"Force Relay"** button on the Alert Received screen is also available as an
+   explicit fallback alongside the automatic relay.
+5. Photos are deliberately never sent over the mesh (too large for a reliable BLE
+   payload) — only the vehicle's text/JSON details. The real photos sync in later via
+   Firestore once a device with the alert gets internet back.
+6. The mesh (and the Firestore internet alert feed) keep running even while the app
+   is backgrounded, via a foreground service (`flutter_foreground_task`,
+   `lib/services/mesh_background_service.dart`) — confirmed working with the app
+   fully backgrounded and the phone locked.
+
+The Dart-facing API (`lib/services/nearby_mesh_service.dart`) is intentionally shaped
+like a drop-in replacement for a Nearby-Connections-style library, so the rest of the
+app (`alert_ingest.dart`, `app_state.dart`, every screen) talks to it the same way
+regardless of what's underneath. See `Progress.md` for the detailed, dated history of
+every transport bug found and fixed to get here.
 
 ---
 

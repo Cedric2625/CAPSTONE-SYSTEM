@@ -7901,3 +7901,184 @@ The original Wi-Fi Direct implementation (`WifiDirectManager.kt`,
 preserved intact and unmodified on the `main` branch, and the source files
 themselves are still present (just unreferenced by the plugin) on this
 branch too, per explicit instruction not to delete the fallback.
+
+
+## `ble-transport-test` real-device bug chain (2026-11-05 to 2026-11-06):
+## from "not tested at all" to confirmed single-hop AND multi-hop delivery,
+## then merged into `main`
+
+Fifteen commits of real, evidence-based fixes on real hardware (2-3
+phones), each one found from an actual failure in System Logs — not
+guessed, and several confirmed on hardware before the next bug surfaced
+underneath it. Final result: the BLE GATT mesh is **confirmed working
+end-to-end**, including true multi-hop (A→B→C, where C is never in A's
+own range) and was then fast-forward-merged into `main` (`main` had no
+commits of its own since this branch diverged, so the merge introduced
+no conflicts and changed nothing beyond moving the branch pointer).
+
+1. **`4d487a2` — status 133 "disconnected before send completed."**
+   Real logs showed a connection probe and the store-carry-forward
+   catch-up loop's several `sendTo` calls all firing at once, each
+   opening its own `connectGatt()` to the same peer address — a
+   well-known real cause of this error. Fixed with a per-device-address
+   serialization queue (`gattQueue`/`gattBusyAddresses` in
+   `VigilinkMeshTransportPlugin.kt`) with a 400ms gap between releasing
+   one queued operation and starting the next.
+2. **`e526a89` — "characteristic not found on peer" / "BLE scan failed
+   to start: already started."** `BluetoothGattServer.addService()` is
+   asynchronous, but `BleGattServer.start()` returned `true` immediately
+   without waiting for `onServiceAdded` confirmation — a peer could
+   discover services before the local server had actually finished
+   registering, especially right after a mesh restart. Fixed with a
+   real `onServiceAdded` callback. Separately, `BleMeshBeacon.startScan()`
+   never stopped a prior scan first (unlike the advertise function right
+   beside it) — fixed to match. Also added a bounded retry (4 attempts,
+   1.5s gap) on any BLE GATT send failure instead of giving up after one.
+3. **`bc18662`** — added stage-by-stage diagnostic logging (scan
+   started/stopped, GATT connected, characteristic found, write
+   completed, incoming alert received) to System Logs, since only a
+   final success/failure line was visible before this. **First real
+   single-hop delivery success on hardware landed on this commit.**
+4. **`85be313` — hop count read backwards.** `hopCount` was a
+   descending TTL: every broadcast forced the wire message to start at
+   `alertMeshHops` (5) regardless of the sender's own value, while the
+   original reporter's own local copy stayed at the model's default 0 —
+   so the reporter always showed "Hop 0" and the very first direct
+   receiver showed "Hop 5," reading backwards. Changed to count UP from
+   0 at the reporter, +1 per real relay hop
+   (`ingestMeshTheftAlert`'s `myHop = receivedHop + 1`); `alertMeshHops`
+   is now the max-hops-before-relay-stops cap, not a starting budget.
+5. **`ac44387` — "nodes" (delivery-confirmation count) stuck at 0.**
+   `relayedTo` only increments once the receiver's own `alert_ack` reply
+   comes back — deliberate, so a successful write is never confused with
+   confirmed delivery. On BLE GATT that ack is its own brand-new
+   `connectGatt()` round trip in the opposite direction (unlike the old
+   TCP-socket transport, where it went back over the same already-open
+   connection almost instantly) — but `_alertAckTimeout` was still 12s,
+   shorter than even one BLE GATT send attempt's own timeout. Raised
+   (later raised again, see below); the ack send itself was also
+   previously silent on failure — now logged explicitly.
+6. **`e748377` — a restart could orphan an in-flight send.**
+   `forceRestart()`/`ensureStopped()` cleared the plugin's own
+   bookkeeping but never cancelled a `BleGattClient` still mid-operation
+   at that exact moment — the orphaned client's native callback could
+   fire later with a misleading failure after the radio had already been
+   torn down underneath it. Added `BleGattClient.cancel()` (abandons
+   without notifying the listener) and `inFlightGattClients` tracking.
+7. **`67d80cc`** — real testing still hit timeouts even with the above;
+   raised `BleGattClient.OPERATION_TIMEOUT_MS` 15s→30s and
+   `GATT_MAX_ATTEMPTS` 4→6 (worst case ~190s per send), with
+   `_alertAckTimeout` raised to 210s to match.
+8. **`d1cc5cb` — the `e748377` cancellation fix was over-applied.**
+   `ensureStopped()` (the passive path, firing on every routine
+   background hand-off, not just an explicit "Restart Scan") was also
+   cancelling in-flight sends — but `ble.stop()`/`gattServer.stop()`
+   only ever tear down this device's own advertiser/scanner/GATT-server;
+   they never touch an already-open OUTGOING `BluetoothGatt` connection,
+   which is free to finish on its own regardless. Cancellation is now
+   only applied in `forceRestart()` (where a fresh reconnect to the same
+   address genuinely can collide with an orphaned one).
+9. **`ffa0d74` — the actual root cause of most delivery failures.**
+   Real logs showed "connected, discovering services" firing fine, then
+   silence until the full timeout, repeating for minutes, with the
+   receiving device's own logs showing zero activity. Root cause:
+   `onConnectionStateChange` fired `requestMtu(517)` and
+   `discoverServices()` back-to-back in the same callback tick — a
+   documented real Android BLE issue where firing a second GATT
+   operation before the first resolves can make `onServicesDiscovered`
+   simply never fire at all (not fail — never call back), silently
+   burning the whole timeout. Fixed by strictly sequencing:
+   `discoverServices()` now only runs from `onMtuChanged`, with a 2s
+   fallback timer in case that callback itself never arrives either.
+   **This is the commit that produced the first fully clean, fast
+   (~1 second) single-hop delivery+ack confirmation on real hardware.**
+10. **`7e72bfd`** — a 3-device multi-hop test (A→B→C) showed B receiving
+    fine but never relaying on to C, with zero evidence in the logs of
+    whether a relay was even attempted. Both the immediate relay-forward
+    (`alert_ingest.dart`) and the store-carry-forward catch-up on
+    `onPeerConnected` were completely silent on "no peer to relay to
+    yet" and on failure — now log one of three distinct outcomes
+    (forwarded / no peer yet / forward failed) instead of silence.
+11. **`fef4d51`** — added a manual **"🔁 FORCE RELAY NOW"** button
+    (Alert Received screen) as an explicit safety net alongside the
+    automatic relay, reusing the existing send/ack-tracking path
+    (`_broadcastAlertReal`, now returning the sent-to set instead of
+    void) rather than a second implementation. Also added
+    `test/alert_ingest_test.dart` — 6 unit tests for `alertWireMessage`'s
+    hop-count behavior, the one piece of the receiving-side logic that's
+    actually unit-testable: `ingestMeshTheftAlert` itself touches the
+    immutable singletons `DatabaseService.instance`/
+    `NearbyMeshService.instance` with no mock seam, and refactoring for
+    dependency injection was judged too invasive to do unprompted.
+12. **`a7aae5b`** — two more real bugs from further 3-device testing:
+    (a) a mesh-received alert that arrived while the screen was locked
+    never showed up in Alert History afterward — `_onAppResumed` only
+    reloaded in-memory state from SQLite when an actual background
+    hand-off (`_meshHandedOff`) had occurred; now reloads unconditionally
+    on every resume. (b) repeated "Duplicate alert... ignored" log spam
+    and the new Force Relay button appearing stuck — root cause: the BLE
+    transport has no persistent "connected" state, so `onPeerConnected`
+    can fire more than once for the same peer (an outgoing probe and a
+    separate incoming write each succeeding independently), and every
+    firing re-ran the full catch-up, re-sending the same alert
+    repeatedly; compounded by `_pendingConnections`' 20s guard
+    auto-clearing while a real probe could now take up to ~190s, letting
+    a second overlapping probe launch. Fixed: catch-up only fires for a
+    genuinely new connection; `_pendingConnections` timeout raised to
+    210s. This also explains why Force Relay looked broken — it was
+    queued behind a growing backlog of redundant automatic retries to
+    the same address.
+
+**Confirmed on real 3-device hardware after `a7aae5b`**: single-hop
+delivery+ack, dashboard sync, AND true multi-hop relay (A→B→C) all work.
+Merged into `main` as a clean fast-forward (`e60235e..a7aae5b`) —
+confirmed via `git diff main ble-transport-test` returning empty before
+pushing.
+
+### Follow-up fixes on `main` after the merge
+
+- **`4acd8e2`** — the Admin Dashboard showed "—" for legacy accounts'
+  "Date Created" despite Firebase Authentication having a real creation
+  date for every one of them. Root cause: the app already captured
+  `fbUser.metadata.creationTime` into `UserModel.createdAt`, but only
+  when building a brand-new local record — an account with an existing
+  cached profile (from before this field existed) never got a second
+  chance to pick it up. Firebase Auth's own creation timestamp is only
+  ever readable for the CURRENTLY signed-in user's own session — not
+  another account's, not even by an admin — so `AppState.init()`'s
+  session-restore path (runs on every app launch while already signed
+  in) now backfills a missing `createdAt` and pushes it to Firestore via
+  the existing merge-safe `upsertUserProfile`.
+- **`22f3c3e`** — the above missed one account: the Admin Dashboard
+  (`lib/admin_main.dart`) is a deliberately separate build, independent
+  of `AppState`/`Provider` — confirmed by actually reading its own
+  top-of-file comment, not assumed — so an admin-only account could
+  never reach the phone-app backfill above. `AdminService.login()` now
+  does the equivalent backfill itself, right after confirming
+  `role == 'admin'`, from `cred.user!.metadata.creationTime`.
+- **`1b1cb70`** — a mesh-received alert's photos never appeared even
+  after the receiving device got internet back, despite the Alert
+  Received screen's own promise that they'd "appear here once this
+  device is back online." Root cause in `ingestInternetAlert`: when the
+  device already knew the alert (the normal mesh-then-internet case), the
+  function unconditionally returned early unless the incoming document's
+  status was strictly newer than what's already stored — but an alert
+  staying `active` the whole way from mesh-receipt through to coming
+  back online is the *ordinary* case, not an edge case, so the photo
+  backfill was being discarded on every normal run, not just some.
+  Restructured so filling in previously-missing `photos` is handled
+  independently of the status-newer check. Confirmed the actual trigger
+  exists: `startAlertFeed()` always re-subscribes fresh on reconnect
+  (`_onConnectivityChanged`), on app resume, and on the background
+  hand-off — and a brand-new Firestore listener always redelivers the
+  current state of every matching document (within its existing 24h
+  window) as its first batch of changes.
+
+**Verified for all of the above**: `flutter analyze` — 0 issues at every
+step. `flutter test` — 21 passing (15 original + 6 new in
+`alert_ingest_test.dart`). `flutter build apk --release` — succeeded
+after every commit, including a dedicated `flutter build web -t
+lib/admin_main.dart` check for the two admin-dashboard-specific fixes.
+Real-device confirmation came from the user's own repeated multi-phone
+testing throughout, with System Logs screenshots checked against the
+code at each step rather than taking "it works now" on faith.

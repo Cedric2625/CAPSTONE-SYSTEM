@@ -46,15 +46,20 @@ VehicleGuard is an Android app, plus a separate browser-only Admin Portal.
    required photo and optional remarks. A vehicle can only have one active
    report at a time, until it is marked recovered.
 5. **Broadcast.** The alert goes to nearby VehicleGuard phones over a real
-   ad hoc mesh — raw BLE advertise/scan for discovery and native Wi-Fi Direct
-   (`WifiP2pManager`) for the connection and data transfer, with no Google
-   Play Services involved anywhere in that path, so it needs no internet at
-   all. It also goes to Firestore, with no distance limit, so any signed-in
-   phone that's online receives it regardless of range. Each alert carries a
-   hop-count limit, and every phone that receives it relays it onward
-   (multi-hop store-and-forward). An Android foreground service keeps both
-   paths running while the app is backgrounded or its Activity is destroyed,
-   not just while it's open.
+   ad hoc mesh — raw BLE GATT for both discovery and the actual connection
+   and data transfer (every phone runs a `BluetoothGattServer` to receive
+   and opens its own `BluetoothGatt` client connections to send), with no
+   Google Play Services involved anywhere in that path, so it needs no
+   internet at all. It also goes to Firestore, with no distance limit, so
+   any signed-in phone that's online receives it regardless of range. Each
+   alert carries a hop count (counting UP from 0 at the original reporter,
+   capped at 5 real hops) and every phone that receives it relays it onward
+   (multi-hop store-and-forward) — confirmed on real multi-device hardware,
+   including a genuine 3-hop chain where the last phone was never in the
+   reporter's own range. A manual "Force Relay" button is also available as
+   an explicit fallback alongside the automatic relay. An Android foreground
+   service keeps both paths running while the app is backgrounded or its
+   Activity is destroyed, not just while it's open.
 6. **Sightings.** Anyone who sees a flagged car can send a sighting (message,
    optional photo and GPS) to the owner, over the same two paths.
 7. **Delivery delay.** Each phone that receives an alert records how long after
@@ -75,7 +80,7 @@ VehicleGuard is an Android app, plus a separate browser-only Admin Portal.
 | `google_sign_in` | ^6.2.1 | "Continue with Google" for already-registered accounts |
 | `cloud_firestore` | ^5.4.4 | Cloud database: profiles, vehicles, alerts, sightings, approvals |
 | `firebase_messaging` | ^15.1.3 | Receives FCM pushes (receive side only, see §9) |
-| `vigilink_mesh_transport` | local (`packages/`) | The real ad hoc mesh — raw BLE advertise/scan + native Wi-Fi Direct, no Play Services |
+| `vigilink_mesh_transport` | local (`packages/`) | The real ad hoc mesh — raw BLE GATT for discovery AND data transfer, no Play Services |
 | `flutter_foreground_task` | ^9.1.0 | Android foreground service — keeps the mesh/Firestore feeds running when backgrounded |
 | `sqflite` + `path` | ^2.3.3+1 / ^1.9.0 | Local SQLite cache (offline-first) |
 | `shared_preferences` | ^2.2.2 | Small flags: login lockout counters, license-on-file cache, profile photo |
@@ -149,7 +154,7 @@ vehicleguard/
 │   │   ├── database_service.dart         Local SQLite cache (schema v8)
 │   │   ├── firebase_auth_service.dart    Firebase Authentication wrapper
 │   │   ├── firebase_sync_service.dart    Firestore reads, writes and live listeners
-│   │   ├── nearby_mesh_service.dart      Ad hoc mesh (raw BLE + native Wi-Fi Direct)
+│   │   ├── nearby_mesh_service.dart      Ad hoc mesh (raw BLE GATT, discovery + data transfer)
 │   │   ├── alert_ingest.dart             Shared alert/sighting ingest logic (foreground + background)
 │   │   ├── mesh_background_service.dart  Foreground-service TaskHandler (mesh + Firestore feeds backgrounded)
 │   │   ├── location_service.dart         GPS wrapper and Haversine distance
@@ -327,15 +332,15 @@ flowchart TD
     C -- "Yes" --> D["StateError → error modal"]
     C -- "No" --> E["Mark vehicle stolen, store alert<br/>(GPS fix, or flagged placeholder)"]
     E --> F["AlertBroadcastingScreen"]
-    E --> H["_broadcastAlertReal: send to every connected peer<br/>(photo removed, hopCount = 5)"]
+    E --> H["_broadcastAlertReal: send to every connected peer<br/>(photo removed, hopCount = 0, this device's own)"]
     E --> J["_syncSoonIfOnline() uploads the full alert, photo included,<br/>to /theft_alerts"]
     H --> K["Peer: NearbyMeshService.onMessageReceived → _handleMeshMessage()"]
     K --> L{"Alert ID already known?"}
     L -- "Yes" --> M["Log duplicate, stop"]
-    L -- "No" --> N["Store alert, log the delivery delay,<br/>notify, show the Stolen Vehicle Nearby popup"]
-    N --> O{"hopCount > 0?"}
-    O -- "Yes" --> P["Forward to every other peer, hopCount - 1"]
-    O -- "No" --> Q["Stop relaying"]
+    L -- "No" --> N["myHop = receivedHop + 1 → store alert at that hop,<br/>log the delivery delay, notify,<br/>show the Stolen Vehicle Nearby popup"]
+    N --> O{"myHop < 5 (alertMeshHops)?"}
+    O -- "Yes" --> P["Forward to every other peer, carrying myHop<br/>(the next receiver adds 1 itself)"]
+    O -- "No" --> Q["Stop relaying — hop limit reached"]
     J --> R["Any other online signed-in phone's alert listener<br/>(_handleInternetAlert) receives the full alert"]
 ```
 
@@ -406,7 +411,7 @@ One malformed document can't crash a list, because every field has a fallback.
 | `GpsStatus`, `NetworkStatus` | enums with `label` getters | GPS and sync indicators |
 | `RegistrationDecision` | `pending`, `rejected` | Why a sign-in was stopped (login screen) |
 | `VehicleDraft` | `plate`, `model` (the Series), `color`, `type`, `yearModel`, `geofence`, `orPhoto`, `crPhoto` | What the registration form collects, before anything is saved |
-| `UserModel` | `id` (Firebase UID), `name`, `email`, `phone`, `role` (`owner`/`admin`), `deviceId`, `createdAt?`; `initials` is derived | Profile. `approvalStatus`, `rejectionReason` and `disabled` live only in Firestore, not on the model |
+| `UserModel` | `id` (Firebase UID), `name`, `email`, `phone`, `role` (`owner`/`admin`), `deviceId`, `createdAt?`; `initials` is derived | Profile. `approvalStatus`, `rejectionReason` and `disabled` live only in Firestore, not on the model. A legacy account's missing `createdAt` (shows "—" on the Admin Dashboard) self-heals from Firebase Auth's own `metadata.creationTime` the next time that specific account's own session signs in — on the phone app (`AppState.init()`) or, for an admin-only account, on admin login (`AdminService.login()`); that value is only ever readable for the currently-signing-in session, never another account's |
 | `VehicleModel` | `id`, `ownerId`, `plate`, `model`, `color`, `type`, `yearModel`, `status` (`active`/`stolen`/`recovered`), `geofenceRadius`, `geofenceActive`, `geofenceCenterLat/Lng`, `deviceId`, `lat`, `lng`, `lastLocationUpdate`, `createdAt?` | `statusLabel`: NOT STOLEN / STOLEN / RECOVERED |
 | `TheftAlert` | `id` (`ALT-{deviceId}-{epochMs}`), `vehicleId`, `userId`, `plate`, `model`, `color`, `lat`, `lng`, `timestamp` (the sent time), `trigger` (`manualReport`/`geofenceViolation`), `status` (`active`/`recovered`/`resolved`), `notes`, `photoB64?`, `hopCount`, `relayedTo`, `isDemoLocation` | `hasPhoto` getter |
 | `SightingReport` | `id`, `alertId`, `ownerId`, `reporterId`, `reporterName`, `reporterPhone`, `message`, `lat?`, `lng?`, `seenAt`, `sentAt`, `photoB64?` | `forMesh()` drops photo and phone. `hasLocation`, `hasPhoto`, `hasContact` |
@@ -452,7 +457,7 @@ coordinates every service. Organized into commented sections.
 | `_startMeshIfNeeded()` / `_startMesh()` / `restartMesh({quiet})` / `requestMeshPermissions()` | Start-up, with one shared in-flight attempt, so overlapping calls cannot cause `STATUS_ALREADY_ADVERTISING` |
 | `_handleMeshMessage(msg, fromEndpointId)` | The relay core, by `msgType`. **`theft_alert`:** dedupe by ID (memory, then SQLite, then re-checked at insert), store, log the delivery delay (`_logAlertDelivery`), notify, forward to every other peer with `hopCount - 1`. **`status_update`:** applies a recovery, with a range check on the status index. **`sighting`:** `_handleMeshSighting` |
 | `_broadcastAlertReal(alert)` | Send the alert over the real mesh. Record `relayedTo` and timings |
-| `_alertWireMessage(alert)` | Alert JSON with `msgType`, `hopCount = 5`, `hasPhotoEvidence`, and **without** `photoB64` (too big for a relay payload) |
+| `_alertWireMessage(alert)` | Alert JSON with `msgType`, the device's own current `hopCount` (0 for a fresh report from its original reporter — see §7.1), `hasPhotoEvidence`, and **without** `photos` (too big for a relay payload) |
 
 *Delivery delay*
 | Function | Purpose |
@@ -536,18 +541,25 @@ coordinates every service. Organized into commented sections.
 ### 4.4 `lib/services/nearby_mesh_service.dart` — the real mesh
 
 **Purpose:** the only file that calls `vigilink_mesh_transport` (a local
-plugin at `packages/vigilink_mesh_transport/` — raw BLE advertise/scan for
-discovery, native `WifiP2pManager` Wi-Fi Direct for the connection and data
-transfer). Replaced `package:nearby_connections` (Google's Nearby Connections
-API) after real device testing found it silently failed to discover anyone
-with no internet on the device — it goes through Google Play Services, which
-needed connectivity on that hardware even though the actual BLE/Wi-Fi Direct
-data path is local. The new plugin has no Play Services involved anywhere,
-so there is nothing left that could depend on connectivity. Advertises and
-discovers at the same time, accepts every incoming connection, and sends
-JSON byte payloads — `NearbyMeshService`'s own public API is unchanged from
-before the swap, so nothing above it (`alert_ingest.dart`, `app_state.dart`,
-every screen) needed to change.
+plugin at `packages/vigilink_mesh_transport/` — raw BLE GATT for BOTH
+discovery and the connection/data transfer, no other radio involved).
+Replaced `package:nearby_connections` (Google's Nearby Connections API)
+after real device testing found it silently failed to discover anyone with
+no internet on the device — it goes through Google Play Services, which
+needed connectivity on that hardware even though the actual BLE data path is
+local. An interim rewrite then used raw BLE for discovery with native
+Wi-Fi Direct (`WifiP2pManager`) for the connection/data transfer; that was
+abandoned after extensive real-device testing showed Android's own Wi-Fi
+Direct group-formation negotiation itself failing at the OS/radio level on
+the test hardware — connections forming and dying within under a second,
+confirmed (by direct code/log audit) not to be an app-level bug. The current
+transport replaces that negotiation stage entirely with BLE GATT, which has
+no equivalent multi-step group-formation to fail: a BLE Central either
+connects to a Peripheral's GATT server or it doesn't. The plugin has no
+Play Services involved anywhere, so there is nothing left that could depend
+on connectivity. `NearbyMeshService`'s own public API is unchanged across
+every one of these swaps, so nothing above it (`alert_ingest.dart`,
+`app_state.dart`, every screen) needed to change.
 
 **State:** `connectedEndpoints` and `discoveredEndpoints` (endpoint ID to name),
 `_pendingConnections`, and a 30 s watchdog timer.
@@ -561,20 +573,28 @@ every screen) needed to change.
 | `_onConnectionInitiated` / `_onConnectionResult` | Accepts every connection. On `CONNECTED`, records the peer and fires `onPeerConnected` |
 | `_onPayloadReceived` | Decodes UTF-8 JSON and fires `onMessageReceived`. A malformed payload is reported, not thrown |
 | `broadcast(message, {excludeEndpointId})` | Sends to every connected peer except the sender. This exclusion prevents a message bouncing back |
-| `sendTo(endpointId, message)` | Sends to one peer. Used to catch up a newly connected peer |
+| `sendTo(endpointId, message)` | Sends to one peer. Used to catch up a newly connected peer, and by the Alert Received screen's manual "Force Relay" button |
 | Watchdog `_watchdogTick()` | Retries a failed start, re-requests a connection to a seen but unconnected peer, and refreshes the radios after 90 s of silence |
 
-**`packages/vigilink_mesh_transport/`** (Android, local plugin): BLE only
-ever advertises/scans a presence beacon (service UUID + a 1-byte
-Group-Owner flag + a 4-byte token) — it never carries alert data. A Wi-Fi
-Direct Group Owner can serve several simultaneous Clients, which is what
-lets 3+ phones share one mesh. There's no public API to rename a phone's
-own Wi-Fi Direct identity (the obvious way to target a specific
-already-formed group), so target selection instead always prefers a
-discovered peer that's already a Group Owner over negotiating a fresh pair.
-Data transfer is a length-prefixed JSON TCP socket between the Group Owner
-and each Client, keyed by the BLE beacon token exchanged in a small
-handshake (since an app can't read its own local Bluetooth MAC address).
+**`packages/vigilink_mesh_transport/`** (Android, local plugin): every phone
+runs both GATT roles at once — a `BluetoothGattServer` (`BleGattServer.kt`,
+peripheral, for receiving) and, per send, a fresh `BluetoothGatt` central
+connection (`BleGattClient.kt`), so there's no "group owner"/negotiation
+step at all, unlike the Wi-Fi Direct approach it replaced. Discovery is a
+separate, lightweight presence beacon (`BleMeshBeacon.kt` — service UUID + a
+4-byte token, raw advertise/scan), which never carries alert data, only "a
+VIGILINK node is nearby." An alert is framed (`BleFraming.kt`: a 4-byte
+length prefix + the 8-char sender token + the JSON payload) and sent as one
+or more GATT characteristic writes, chunked to whatever MTU gets negotiated.
+The receiver sends back an `alert_ack` once it has actually stored the
+alert, so a successful radio write is never confused with confirmed
+delivery (`AppState._onAlertAcked` / the "nodes"/"✓ Received" UI). A real,
+confirmed-on-hardware bug chain (per-address GATT serialization, a GATT
+service-registration race, `discoverServices()`/`requestMtu()` being fired
+in the same callback tick — a documented real Android BLE issue — duplicate
+connection-event handling, and more) was found and fixed one at a time
+before this was confirmed working end to end; see `Progress.md`'s
+2026-11-05/06 entries for the full, dated account of each one.
 
 ### 4.5 `lib/services/alert_ingest.dart` and `mesh_background_service.dart`
 
@@ -784,7 +804,7 @@ flowchart TB
         SQLITE[("SQLite vehicleguard.db")]
         FIRESTORE[("Firestore")]
         FBAUTH[("Firebase Auth")]
-        TRANSPORT[("BLE + Wi-Fi Direct (native, no Play Services)")]
+        TRANSPORT[("BLE GATT (native, no Play Services)")]
     end
 
     S --> APPSTATE
@@ -884,7 +904,7 @@ Firebase Console, and the required rule blocks are written in `Progress.md`
   handling happens at Firebase.
 - **Cloud Firestore:** the only server the app calls.
 - **OpenStreetMap tiles** (through `flutter_map`): map images only.
-- **Raw Android BLE + Wi-Fi Direct** (`packages/vigilink_mesh_transport/`):
+- **Raw Android BLE GATT** (`packages/vigilink_mesh_transport/`):
   direct discovery and connection between two nearby phones, with no Google
   Play Services involved — not an internet service, and nothing in the path
   that could depend on one.
@@ -900,22 +920,33 @@ Implemented in `alert_ingest.dart` (the dedup/hop/relay logic itself, shared
 by the foreground and the background service) and `nearby_mesh_service.dart`
 (the underlying transport).
 
-1. **Hop limit (TTL).** A new alert starts with `hopCount = 5`
-   (`_alertMeshHops`). Each phone that forwards it decrements the count. At zero
-   it is not forwarded. This stops an alert circulating forever in a mesh with
-   loops.
+1. **Hop limit.** A new alert starts at `hopCount = 0` on the original
+   reporter's own device. Each phone that receives it sets
+   `myHop = receivedHop + 1` before storing and forwarding it, so the count
+   climbs by exactly one per real device it actually passes through. Once
+   `myHop` reaches `alertMeshHops` (5), that phone still keeps and shows the
+   alert but stops relaying it further — this stops an alert circulating
+   forever in a mesh with loops. (This flipped from an earlier
+   descending-TTL design — see `Progress.md`'s 2026-11-05 entry for why:
+   the original reporter always showed "Hop 0" while the very first direct
+   receiver showed "Hop 5," which read backwards.)
 2. **No bounce-back.** `broadcast` excludes the phone the message came from.
 3. **Duplicate suppression.** The alert ID is checked against memory and SQLite,
    and again at insert, because the mesh and internet paths can deliver the same
    alert in the same moment. A duplicate is logged and dropped.
 4. **Store-carry-forward.** When a new peer connects, every active alert is sent
-   to it. A phone that joins late still gets the alert.
+   to it. A phone that joins late still gets the alert. A manual "Force Relay"
+   button on the Alert Received screen is also available as an explicit,
+   user-triggered alternative to waiting for this automatic path.
 
-**What the hop count means:** the value that remains of the TTL when a phone
-receives the alert. The alert starts at 5. A phone that receives it directly
-from the reporter sees 5. Each forward takes one off. Internet deliveries are
-recorded as hop 0. The existing alert card and the delivery log both use this
-same meaning.
+**What the hop count means:** how many real devices the alert has actually
+passed through to reach this one — 0 at the original reporter, 1 at a phone
+that received it directly, 2 at a phone that received it by relay through
+one other phone, and so on. Internet deliveries are recorded as hop 0 (a
+direct cloud delivery isn't a mesh hop). The existing alert card and the
+delivery log both use this same meaning. Confirmed on real 2-3 phone
+hardware tests, including a genuine 3-hop chain (reporter → B → C, where C
+was never in the reporter's own radio range).
 
 **Not multi-hop:** a single phone's radio range (about 10–100 m). The multi-hop
 property comes from the chaining above.
@@ -1024,30 +1055,40 @@ a newer one.
 
 **Mesh**
 
-4. **Is the Bluetooth/Wi-Fi Direct mesh real?**
+4. **Is the Bluetooth mesh real?**
    Yes. `NearbyMeshService` uses a local plugin (`vigilink_mesh_transport`) built
-   on raw BLE advertise/scan and native `WifiP2pManager` Wi-Fi Direct — real
-   discovery, connection and byte transfer between real phones, with no
-   simulated fallback and no Google Play Services anywhere in the path.
-   Testing requires two physical devices. (This replaced
+   on raw BLE GATT — real discovery, connection and byte transfer between real
+   phones, with no simulated fallback and no Google Play Services anywhere in
+   the path. Confirmed working end to end on real multi-device hardware,
+   including true multi-hop relay. (This replaced
    `package:nearby_connections` — Google's Nearby Connections API — after real
    device testing found it silently failed to discover anyone with no
-   internet on the device, because it goes through Play Services.)
+   internet on the device, because it goes through Play Services. An interim
+   rewrite then used native Wi-Fi Direct for the connection/data-transfer
+   leg; that was abandoned after real-device testing showed Android's own
+   Wi-Fi Direct group-formation negotiation itself failing at the OS/radio
+   level on the test hardware — not an app bug, confirmed by direct code and
+   log audit. BLE GATT has no equivalent group-formation stage to fail.)
 
 5. **How does an alert reach a phone that is out of range of the reporter?**
-   Relay. Each alert starts with a hop limit of 5. A phone that receives it
-   forwards it to every other connected phone, one hop less each time. A phone
-   never forwards to the one that sent it, and every phone drops an alert it has
-   already seen. The alert can also reach a phone through the internet feed.
+   Relay. Each alert starts at hop 0 on the reporter's own device. A phone
+   that receives it sets its own hop to one more than the sender's, then
+   forwards it to every other connected phone (carrying its own hop value,
+   so the next receiver adds one itself), up to a cap of 5 real hops. A
+   phone never forwards to the one that sent it, and every phone drops an
+   alert it has already seen. The alert can also reach a phone through the
+   internet feed. Confirmed on real hardware with a genuine 3-hop chain.
 
-6. **Does "BLE discovers, Wi-Fi Direct relays" describe the system?**
-   Yes, as of the native-transport rewrite — this is now a literal two-stage
-   pipeline: BLE advertise/scan is a pure presence beacon (it never carries
-   alert data), and the connection plus all data transfer happen over real
-   Wi-Fi Direct. (Under the earlier `nearby_connections`-based
-   implementation this wasn't true — that library negotiated the radios
-   itself under one `P2P_CLUSTER` strategy, treating BLE/Wi-Fi Direct as
-   alternatives rather than fixed stages.)
+6. **Does BLE handle both discovery AND the actual alert data transfer?**
+   Yes. Every phone runs both GATT roles at once — a `BluetoothGattServer`
+   to receive, and a fresh `BluetoothGatt` client connection per send — so
+   there's no separate "connect over a different radio" stage at all.
+   (Under the earlier `nearby_connections`-based implementation this
+   wasn't true either — that library negotiated the radios itself under one
+   `P2P_CLUSTER` strategy. A later, now-abandoned interim version used BLE
+   only for discovery and native Wi-Fi Direct for the actual data transfer;
+   that was dropped after Wi-Fi Direct's own group-formation stage proved
+   unreliable at the OS level on the test hardware.)
 
 7. **What is store-carry-forward here?**
    An alert is kept on every phone that has it. When a new peer connects, the
@@ -1059,9 +1100,10 @@ a newer one.
    both requests colliding.
 
 9. **Range and limits?**
-   About 10–100 m, depending on the radios and the phone. It needs Bluetooth,
-   location and Wi-Fi switched on. Wi-Fi does not need a network, only to be
-   powered. The app no longer has to be in the foreground — a foreground
+   About 10–100 m, depending on the radios and the phone (plain BLE range,
+   since the whole mesh — discovery and data transfer — is BLE GATT now; no
+   separate Wi-Fi radio is involved at all). It needs Bluetooth and location
+   switched on. The app no longer has to be in the foreground — a foreground
    service (`mesh_background_service.dart`) keeps the mesh and Firestore feed
    running after Home or Back, not just while the app is open (see §9, which
    used to call this a limitation).
@@ -1077,7 +1119,11 @@ a newer one.
 11. **Why doesn't the photo travel over the mesh?**
     A photo can be up to about 450 KB, too large for a reliable relay across
     several hops. The mesh copy carries a `hasPhotoEvidence` flag. The photo
-    arrives through the internet path.
+    arrives through the internet path, backfilled into the already-stored
+    mesh alert automatically once that device gets internet back (via the
+    Firestore alert feed re-delivering the full document on reconnect) — a
+    real bug where this silently never happened for an alert whose status
+    hadn't also changed was found and fixed; see `Progress.md`.
 
 **Registration and approval**
 
@@ -1210,19 +1256,30 @@ a newer one.
 14. **No test covers the mesh, Firestore or the approval flow end to end.** They
     need physical phones or a live Firebase project. Confidence comes from manual
     testing, recorded in `Progress.md`.
-15. **Real distance is unknown for real peers.** Neither BLE nor Wi-Fi Direct
-    gives a distance, so the UI shows "Nearby" for real peers.
-16. **3+ device grouping has one open risk.** With no public API to rename a
-    phone's own Wi-Fi Direct identity, a new peer can't be steered to a
-    *specific* already-formed group by name — it just prefers whichever
-    discovered peer is already a Group Owner. This needs real multi-device
-    testing to confirm it reliably joins the right group rather than forming
-    a second, separate one.
+15. **Real distance is unknown for real peers.** BLE doesn't give a distance,
+    so the UI shows "Nearby" for real peers.
+16. **BLE GATT send reliability needed real-device tuning.** Unlike the Wi-Fi
+    Direct approach it replaced (abandoned for a different, OS-level
+    reliability problem — see §4.4/§8 Q4), BLE GATT connections on some
+    hardware needed a bounded retry budget (multiple attempts with a gap
+    between them, up to roughly a minute total) to reliably ride out
+    transient radio contention and a couple of real sequencing bugs found
+    along the way. This is now confirmed working, including multi-hop, but
+    a send can still occasionally take several seconds to tens of seconds
+    to succeed on a busy radio — the manual "Force Relay" button exists
+    partly as a user-facing way to retry without waiting.
 
 ---
 
 *This guide describes the code as of 2026-10-05, with the mesh/alert-delivery
-sections (§1, §4.4-4.5, §6.4, §7.1, §7.4, §8 Q4/Q6/Q9/Q10, §9) updated on
+sections (§1, §4.4-4.5, §6.4, §7.1, §7.4, §8 Q4/Q6/Q9/Q10/Q11, §9) updated on
 2026-11-04 for the background foreground-service, the distance-filter
-removal, and the native BLE/Wi-Fi Direct transport rewrite. Everything else
-still reflects 2026-10-05. The change history is in `Progress.md`.*
+removal, and the native BLE/Wi-Fi Direct transport rewrite, and updated
+again on 2026-11-10 for the transport's second rewrite — Wi-Fi Direct's own
+data-transfer leg replaced by BLE GATT end to end, after Wi-Fi Direct's
+group-formation negotiation itself proved unreliable at the OS level on the
+test hardware — the hop-count semantics flip (descending TTL → ascending
+hops-actually-traveled), the mesh being confirmed working end to end
+including real multi-hop on hardware, the manual "Force Relay" button, and
+the `createdAt`/photo-backfill self-heal fixes (§6.1, §8 Q11). Everything
+else still reflects 2026-10-05. The change history is in `Progress.md`.*
