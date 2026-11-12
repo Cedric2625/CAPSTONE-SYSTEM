@@ -1,252 +1,342 @@
-# 🛡️ VehicleGuard — Real-Time Vehicle Theft Monitoring & Alert System
+# 🛡️ VIGILINK
 
-A Flutter mobile app for real-time vehicle theft detection, alert dissemination via a
-real, zero-internet Bluetooth Low Energy ad hoc mesh (MANET/VANET), and centralized
-monitoring — built for Butuan City, Philippines (Capstone Project, Caraga State
-University).
+**Real-Time Vehicle Theft Monitoring and Alert System Using Ad Hoc Networks**
 
----
+**CONNECT • DETECT • PROTECT**
 
-## 📱 Screens Implemented (all 14 from the low-fidelity prototype)
+## Overview
 
-| # | Screen | Route |
-|---|--------|-------|
-| S1 | Welcome / Splash | `/` |
-| S2 | Register Account | `/register` |
-| S3 | Login | `/login` |
-| S4 | Register Vehicle | `/register-vehicle` |
-| S5 | Home Dashboard | `/home` |
-| S6 | Set Geofence | `/geofence` |
-| S7 | Report Stolen | `/report` |
-| S8 | Alert Broadcasting | `/broadcasting` |
-| S9 | Alert Received (Nearby User) | `/alert-received` |
-| S10 | Proximity Map | `/prox-map` |
-| S11 | Alert History | `/alert-history` |
-| S12 | Update Vehicle Status | `/update-status` |
-| S13 | Push Notifications | `/notifications` |
-| S14 | User Profile | `/profile` |
-| +  | System Logs | `/logs` |
-| S16 | Report a Sighting (nearby user → owner) | `/report-sighting` |
-| S16 | Sightings of My Stolen Vehicle (owner) | `/alert-sightings` |
-| S18 | Driver's License Verification (login check for accounts with no license on file; at registration it is part of the Register form) | — |
+Theft alerts that depend entirely on internet or cellular coverage can fail
+exactly when they're needed most — in areas with weak signal, during network
+outages, or the moment a thief disables a vehicle's connected systems.
+VIGILINK addresses this by sharing stolen-vehicle alerts directly between
+nearby registered smartphones over Bluetooth Low Energy (BLE), with no
+internet required for that path, while also delivering alerts through Cloud
+Firestore to every signed-in user whenever internet is available.
 
-Registration requires a photo of the front and back of a valid driver's license (S2), and vehicle
-registration (S4) requires separate photos of the vehicle's OR and CR.
+**Objectives**
+- Detect vehicle theft automatically (geofence violation) or by manual report.
+- Deliver alerts to nearby registered users even with no internet connection,
+  using a real BLE ad hoc mesh with multi-hop relay.
+- Keep every registered user — owners, nearby users, and administrators —
+  informed through a consistent alert history, system log, and admin portal.
 
-The web-only **Admin Portal** is a separate build (`flutter build web -t lib/admin_main.dart`) and is
-intentionally not part of the phone app. It has four tabs: **Accounts** (user information, driver's
-license), **Vehicles** (registration records and OR/CR photos), **Live Activity** and **Map** (FR-11).
+**Target users:** vehicle owners/drivers, nearby registered users who may
+relay or witness an alert, and the system administrator.
 
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-1. **Flutter SDK** — Install from https://flutter.dev/docs/get-started/install
-   - Recommended: Flutter 3.19+ (Dart 3.x)
-2. **Android Studio** — For Android emulator
-   - OR connect a physical Android device (Android 10+)
-3. **VS Code** or **Cursor** with the Flutter & Dart extensions
-
-### VS Code / Cursor Extensions
-
-Install these from the Extensions panel (`Ctrl+Shift+X`):
-- `Dart` (by Dart Code)
-- `Flutter` (by Dart Code)
+**Scope and limitations**
+- Study area: Butuan City, Philippines.
+- Covers four-wheel private vehicles only.
+- Requires Android 10+ with Bluetooth LE and GPS.
+- Smartphones act as the mobile ad hoc network nodes — there is no separate
+  vehicle-mounted hardware; see §7 for what this means in practice.
+- Offline (BLE) delivery only reaches registered devices within Bluetooth
+  range of each other, directly or through relay.
+- Not integrated with law-enforcement dispatch systems — the app surfaces
+  local emergency hotline numbers for the user to call manually, it does not
+  file a police report automatically.
 
 ---
 
-## 📦 Installation & Setup
+## Main Features
 
-### Step 1 — Open the project
-```bash
-# Open in VS Code
-code vehicleguard/
+- Registration with driver's license capture (front/back) and admin approval
+  before an account can sign in.
+- Vehicle registration — OR/CR photos, plate, make/color, engine and chassis
+  numbers, multiple vehicles per owner.
+- Geofence boundary per vehicle, with an "approaching boundary" warning
+  before an actual violation.
+- Manual stolen-vehicle report with exactly 3 photos, or an automatic report
+  on geofence violation.
+- Real BLE ad hoc mesh alert delivery with multi-hop relay (up to 5 hops).
+- Store-carry-forward — a device relays an alert to a newly connected peer
+  even if that happens much later, without needing everyone connected at once.
+- A manual "Force Relay" action as an explicit fallback alongside the
+  automatic relay.
+- Cloud Firestore delivery to every signed-in user, with no distance limit,
+  whenever internet is available.
+- Alerts and the Firestore feed keep working while the app is backgrounded,
+  via an Android foreground service.
+- Sighting reports from nearby users back to the owner.
+- Recovery updates with required proof photo and remarks.
+- Alert history, delivery-delay logging, and a System Logs screen.
+- A separate web Admin Portal for account/vehicle approval and monitoring.
 
-# Or in Cursor
-cursor vehicleguard/
+---
+
+## User Roles and Access Levels
+
+| Role | What they can do |
+|---|---|
+| **Admin** (web portal) | Approve or reject new registrations; manage accounts and vehicles; view Live Activity; view the Map. Created by hand in the Firebase Console (a normal email/password account with `role: 'admin'` set on its Firestore document) — there is no in-app way to create or promote an admin. |
+| **Registered user — vehicle owner** | Register vehicles, set a geofence, report a vehicle stolen (manually or automatically), update status/mark recovered, view their own alert history. |
+| **Registered user — nearby user** | Receive alerts over BLE or Firestore, relay alerts onward, report a sighting of a flagged vehicle to its owner. |
+
+Every account must verify its email (Google sign-in is exempt — Firebase
+marks it verified automatically) and be approved by an admin before it can
+sign in; a pending or rejected account is blocked at login.
+
+---
+
+## System Requirements
+
+| Requirement | Detail |
+|---|---|
+| Mobile OS | Android 10+ (API 29+), with Bluetooth LE and GPS hardware |
+| Flutter / Dart | Flutter with Dart SDK `>=3.6.0 <4.0.0` (see `pubspec.yaml`) |
+| Backend | Firebase (Authentication, Cloud Firestore) |
+| Admin Portal | Any modern desktop browser (Chrome recommended) |
+
+---
+
+## Installation and Setup
+
+1. **Clone and fetch dependencies**
+   ```bash
+   git clone <repo-url>
+   cd vehicleguard
+   flutter pub get
+   ```
+
+2. **Firebase setup.** This project expects two config files that are
+   intentionally **not committed** to version control (see `.gitignore`):
+   `android/app/google-services.json` (Android) and `lib/firebase_options.dart`
+   (generated by the FlutterFire CLI). Obtain your own copies from your
+   Firebase project console / `flutterfire configure` and place them at those
+   exact paths before building. TODO: confirm whether `lib/firebase_options_web.dart`
+   (used by the Admin Portal web build) also needs to be supplied locally —
+   it is present in version control in this repo, which is inconsistent with
+   how the other two Firebase config files are handled; see the mismatch note
+   at the end of this task.
+
+3. **Run / build the mobile app**
+   ```bash
+   flutter devices              # list available devices
+   flutter run                  # run on a connected Android device/emulator
+   flutter build apk --release  # build the release APK
+   # Output: build/app/outputs/flutter-apk/app-release.apk
+   adb install build/app/outputs/flutter-apk/app-release.apk
+   ```
+
+4. **Build and run the Admin Portal** (a separate web-only entry point —
+   it does not share `AppState` with the phone app)
+   ```bash
+   flutter build web -t lib/admin_main.dart
+   # or, for local development:
+   flutter run -d chrome -t lib/admin_main.dart
+   ```
+
+**Permissions required on the phone**
+- **Bluetooth** (scan/advertise/connect) — ad hoc mesh discovery and alert transfer.
+- **Location** (fine + coarse) — required by Android alongside Bluetooth LE, and for geofencing/GPS tagging.
+- **Notifications** — local alert/status notifications.
+- **Foreground service** — keeps the mesh and Firestore alert feed running while the app is backgrounded.
+
+**Troubleshooting**
+- No nearby devices found: confirm Bluetooth **and** Location are both switched on for both phones.
+- Alerts stop arriving after the app is backgrounded for a while: check the phone's battery-optimization settings and exempt VIGILINK — some Android OEM skins kill background services more aggressively than stock Android.
+- Can't log in after registering: the account may still be pending admin approval, or the email-verification link hasn't been confirmed yet — check both.
+- "Restart Scan" does nothing: confirm the app has all Bluetooth/location permissions actually granted (not just requested) in the phone's system settings.
+
+---
+
+## User Manual
+
+1. **Register.** Open the app → Register → fill in details, capture driver's
+   license front/back → submit → verify the emailed link → wait for admin
+   approval.
+   ![Register](screenshots/register.png)
+2. **Log in / log out.** Log in with the verified, approved account; log out
+   from the Profile screen.
+   ![Login](screenshots/login.png)
+3. **Navigate.** Bottom navigation: Home, Map, Alerts, Profile.
+   ![Navigation](screenshots/navigation.png)
+4. **Add/edit a vehicle.** From Home, add a vehicle with its plate,
+   make/color, engine/chassis numbers, and OR/CR photos.
+   ![Add vehicle](screenshots/add-vehicle.png)
+5. **Set a geofence.** Open a vehicle → Geofence → set the radius around its
+   current/parked location.
+   ![Geofence](screenshots/geofence.png)
+6. **Report a stolen vehicle.** From Home → Report Stolen → attach 3 photos
+   and notes → submit. (A geofence violation files this automatically.)
+   ![Report stolen](screenshots/report-stolen.png)
+7. **Receive and relay an alert.** A nearby device shows "Stolen Vehicle
+   Nearby" with a notification; it relays onward automatically, or via the
+   manual Force Relay action.
+   ![Alert received](screenshots/alert-received.png)
+8. **Report a sighting.** From an alert, open "Report a Sighting" to send a
+   message/photo/location to the vehicle's owner.
+   ![Report sighting](screenshots/report-sighting.png)
+9. **Mark a vehicle recovered.** From the alert, Update Status → attach the
+   required recovery photo and remarks.
+   ![Mark recovered](screenshots/mark-recovered.png)
+10. **View alert history and logs.** Alerts tab for history; Profile → System
+    Logs for the full technical log.
+    ![Alert history](screenshots/alert-history.png)
+11. **Admin Portal tasks.** Log in at the Admin Portal URL → Approvals tab to
+    approve/reject registrations → Accounts/Vehicles tabs to manage records →
+    Live Activity/Map to monitor in real time.
+    ![Admin dashboard](screenshots/admin-dashboard.png)
+
+---
+
+## System Design and Technical Details
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph Presentation
+        A[Mobile App - Flutter/Android]
+        B[Admin Portal - Flutter Web]
+    end
+    subgraph Application
+        C[AppState / Provider]
+        D[vigilink_mesh_transport - BLE GATT mesh]
+        E[AdminService]
+    end
+    subgraph Data
+        F[(Cloud Firestore)]
+        G[(SQLite - local cache)]
+        H[(Firebase Authentication)]
+    end
+    A --> C
+    C --> D
+    C --> F
+    C --> G
+    C --> H
+    B --> E
+    E --> F
+    E --> H
+    D -. BLE, no internet .-> D
 ```
 
-### Step 2 — Install dependencies
-```bash
-flutter pub get
-```
+### Main Data Entities
 
-### Step 3 — Run on emulator or device
-```bash
-# List available devices
-flutter devices
+| Entity | Key fields | Notes |
+|---|---|---|
+| `UserModel` | `id`, `name`, `email`, `phone`, `role` (`owner`/`admin`), `deviceId`, `createdAt?` | Firestore `users/{uid}`; `approvalStatus`/`disabled` live only in Firestore |
+| `VehicleModel` | `id`, `ownerId`, `plate`, `model`, `color`, `engineNumber`, `chassisNumber`, `status`, `geofenceRadius`, `geofenceCenterLat/Lng` | Firestore `users/{uid}/vehicles/{id}` |
+| `TheftAlert` | `id`, `vehicleId`, `userId`, `plate`, `lat`/`lng`, `trigger`, `status`, `photos` (up to 3), `hopCount`, `relayedTo`, `recoveryPhotos`, `recoveryRemarks` | Firestore `theft_alerts/{id}` |
+| `SightingReport` | `id`, `alertId`, `ownerId`, `reporterId`, `message`, `lat?`/`lng?`, `photoB64?` | Firestore `sightings/{id}` |
+| `AdHocNode` | `id`, `name`, `isOnline`, `connectionType`, `relayStatus`, `endpointId` | Local-only (mesh status display) |
 
-# Run on a specific device
-flutter run
+**Firestore collections in active use:** `users`, `vehicles`, `documents`
+(license/OR/CR uploads), `license`, `theft_alerts`, `sightings`,
+`alert_deliveries`, `location_history`, `presence`, `plates`,
+`account_names`, `removed_accounts`.
 
-# Run on Chrome (for quick UI testing — no GPS/BLE)
-flutter run -d chrome
-```
+### How Alerts Are Delivered
 
-### Step 4 — Build APK (for device installation)
-```bash
-flutter build apk --release
-# APK output: build/app/outputs/flutter-apk/app-release.apk
-```
+- **Direct BLE** — every phone runs a BLE GATT server (to receive) and opens
+  a fresh BLE GATT client connection per send (to send); no separate radio or
+  connection type is involved.
+- **Multi-hop relay** — hop count starts at 0 on the original reporter's own
+  device and increases by 1 at each real device that relays it, capped at 5
+  hops; every device drops a duplicate it has already seen.
+- **Store-carry-forward** — when no other device is in range yet, the alert
+  is simply kept and relayed automatically the next time this device
+  connects to a new peer.
+- **Cloud Firestore** — delivered to every signed-in user with no distance
+  limit, whenever that device has internet.
+- **Offline-to-online sync** — any alert recorded while offline (by the
+  reporter or a relay) uploads to Firestore automatically once that device
+  regains internet.
 
----
+### Key Technical Notes
 
-## 🔑 Accounts
+- The BLE transport (`packages/vigilink_mesh_transport/`) is a local Flutter
+  plugin: a presence/discovery beacon (advertise + scan) separate from the
+  actual alert data path (BLE GATT server/client), plus an acknowledgment
+  message so a successful radio write is never confused with confirmed
+  delivery.
+- Photos are never sent over BLE (too large for a reliable relay payload) —
+  only the vehicle's text details travel the mesh, with a flag noting a
+  photo exists. The real photo arrives later through Firestore once that
+  device is back online.
+- An Android foreground service keeps the mesh and the Firestore alert feed
+  running while the app is backgrounded or its Activity is destroyed, for as
+  long as the user stays logged in; it stops on logout.
+- Geofence violation detection is location-based only, using the Haversine
+  formula to compare a vehicle's current GPS fix against its saved geofence
+  center and radius — there is no separate hardware vehicle tracker.
+- **Broadcast radius** means the BLE signal range of each individual
+  smartphone — it is not a fixed distance or something computed from GPS. It
+  depends on the phone's own Bluetooth hardware and physical surroundings
+  (walls, distance, interference). A reported alert's location comes from
+  the reporting phone's own GPS fix (available even with no internet); each
+  receiving phone then computes its own distance to that location using the
+  Haversine formula.
 
-There is no demo account. Register through the app with a real email address and verify it via the
-link Firebase sends. Admin accounts are created by hand in the Firebase Console (see `Progress.md`).
-
----
-
-## 🗂️ Project Structure
+### Project Structure
 
 ```
 lib/
-├── main.dart                          ← App entry point & route config
-├── models/
-│   └── models.dart                    ← UserModel, VehicleModel, TheftAlert,
-│                                        AdHocNode, NotifItem, SystemLog, etc.
+├── main.dart                              ← phone app entry point & routes
+├── admin_main.dart                        ← separate web entry point (Admin Portal)
+├── models/models.dart                     ← UserModel, VehicleModel, TheftAlert, etc.
 ├── services/
-│   ├── app_state.dart                 ← ChangeNotifier — all business logic,
-│   │                                    auth, vehicle CRUD, alert broadcasting,
-│   │                                    foreground mesh ownership, logging
-│   ├── nearby_mesh_service.dart       ← Dart-facing mesh API (wraps the real
-│   │                                    BLE transport plugin)
-│   ├── alert_ingest.dart              ← shared, portable alert/sighting ingest —
-│   │                                    dedup, hop-count, relay — used by BOTH
-│   │                                    AppState and the background service
-│   └── mesh_background_service.dart   ← foreground-service TaskHandler: keeps
-│                                        the mesh + Firestore feeds alive while
-│                                        the app is backgrounded
-├── utils/
-│   ├── app_theme.dart                 ← AppColors, AppTheme
-│   ├── validators.dart                ← shared mobile-number check
-│   └── time_format.dart               ← shared "5m ago" formatter
-├── widgets/
-│   └── widgets.dart                   ← Shared: AppCard, AppTextField,
-│                                        PrimaryButton, VehicleCard, AlertLogItem,
-│                                        NodeRelayRow, ProximityNodeRow, StatusBadge
+│   ├── app_state.dart                     ← main ChangeNotifier: auth, vehicles, alerts
+│   ├── nearby_mesh_service.dart           ← Dart-facing mesh API
+│   ├── alert_ingest.dart                  ← shared alert/sighting ingest, dedup, hop-count, relay
+│   ├── mesh_background_service.dart       ← foreground-service TaskHandler
+│   ├── admin_service.dart                 ← Admin Portal auth + account/vehicle management
+│   ├── database_service.dart              ← local SQLite cache
+│   ├── firebase_auth_service.dart         ← Firebase Authentication wrapper
+│   ├── firebase_sync_service.dart         ← Firestore reads/writes/live listeners
+│   ├── location_service.dart              ← GPS wrapper, Haversine distance
+│   ├── connectivity_service.dart          ← online/offline detection
+│   └── notification_service.dart          ← local notifications
+├── utils/                                 ← theme, validators, time format, hotlines, etc.
+├── widgets/                                ← shared UI components
 └── screens/
-    ├── s1_splash_screen.dart          ← S1: Welcome/Splash
-    ├── s2_s3_auth_screens.dart        ← S2: Register, S3: Login
-    ├── s4_s5_vehicle_home.dart        ← S4: Register Vehicle, S5: Home Dashboard
-    ├── s6_s7_s8_geofence_report.dart  ← S6: Geofence, S7: Report Stolen,
-    │                                    S8: Alert Broadcasting
-    ├── s9_s10_s11_alerts_map.dart     ← S9: Alert Received, S10: Proximity Map,
-    │                                    S11: Alert History
-    ├── s12_s13_s14_status_notif_profile.dart
-    │                                  ← S12: Update Status, S13: Notifications,
-    │                                     S14: Profile, + System Logs
-    ├── s16_sightings.dart             ← report / review sightings
-    └── s18_license_verification.dart  ← driver's license capture
+    ├── s1_splash_screen.dart
+    ├── s2_s3_auth_screens.dart            ← Register, Login
+    ├── s4_s5_vehicle_home.dart            ← Register Vehicle, Home
+    ├── s6_s7_s8_geofence_report.dart      ← Geofence, Report Stolen, Alert Broadcasting
+    ├── s9_s10_s11_alerts_map.dart         ← Alert Received, Proximity Map, Alert History
+    ├── s12_s13_s14_status_notif_profile.dart ← Update Status, Notifications, Profile, System Logs
+    ├── s16_sightings.dart                 ← report/review sightings
+    ├── s18_license_verification.dart      ← driver's license capture
+    ├── onboarding_screen.dart
+    └── admin/                             ← Admin Portal screens
 
-lib/widgets/document_photo.dart        ← shared photo card + camera/gallery helper
-lib/admin_main.dart + lib/screens/admin/  ← web Admin Portal (dashboard, accounts,
-                                             vehicles, live activity/map, shared widgets)
-
-packages/vigilink_mesh_transport/      ← local Flutter plugin: the real BLE ad hoc
-                                          mesh (Dart API + native Kotlin GATT
-                                          server/client, discovery beacon, framing)
+packages/vigilink_mesh_transport/          ← local plugin: real BLE GATT mesh (Dart API + native Kotlin)
 ```
 
----
-
-## 🔧 Key Dependencies
+### Key Dependencies
 
 | Package | Purpose |
-|---------|---------|
-| `provider` | State management (AppState / ChangeNotifier) |
-| `google_fonts` | DM Sans + DM Mono typography |
-| `geolocator` | GPS location for geofence & theft detection |
-| `permission_handler` | BLE, location, notification permissions |
-| `flutter_local_notifications` | Push notification simulation |
-| `intl` | Date/time formatting |
-| `sqflite` | Local offline storage |
-| `firebase_auth` / `cloud_firestore` | Accounts, cloud sync, internet alert + sighting delivery |
-| `vigilink_mesh_transport` (local plugin, `packages/vigilink_mesh_transport/`) | Real BLE ad hoc mesh — discovery + data transfer, zero internet dependency |
-| `flutter_foreground_task` | Keeps the mesh and the Firestore alert feed running in the background (Home/Back press, Activity destruction) |
+|---|---|
+| `provider` | State management (`AppState` / `ChangeNotifier`) |
+| `firebase_auth` / `cloud_firestore` / `firebase_core` | Accounts, cloud database, cloud sync |
+| `firebase_messaging` | Push notification receipt |
+| `vigilink_mesh_transport` (local plugin) | Real BLE ad hoc mesh — discovery and data transfer, zero internet dependency |
+| `flutter_foreground_task` | Keeps the mesh and Firestore feed running while backgrounded |
+| `flutter_local_notifications` | Real local device notifications |
+| `geolocator` | GPS location for geofencing and alert tagging |
+| `permission_handler` | Bluetooth, location, and notification permission requests |
+| `sqflite` | Local offline-first storage |
+| `image_picker` | Camera/gallery capture for licenses, OR/CR, and report photos |
+| `connectivity_plus` | Network connectivity detection |
+| `google_sign_in` | "Continue with Google" sign-in |
+| `flutter_map` / `latlong2` | Proximity map display |
 | `shared_preferences` | Small local settings |
 
 ---
 
-## 📡 Ad Hoc Network — real BLE mesh, not simulated
+## Evaluation
 
-The ad hoc relay is a **real, working** Bluetooth Low Energy mesh — no Play Services,
-no internet dependency, confirmed on physical multi-device tests including true
-multi-hop relay (a device out of the reporter's own range still receives the alert
-via a device in between). It lives in the local Flutter plugin
-`packages/vigilink_mesh_transport/`, not in `AppState`.
-
-An earlier implementation used Android's native Wi-Fi Direct for the data-transfer
-leg; that was abandoned after real-device testing showed Android's own Wi-Fi Direct
-group-formation negotiation failing at the OS/radio level on the test hardware. The
-current transport is BLE GATT end to end:
-
-1. Every device runs **both** roles at once — a `BluetoothGattServer` (peripheral,
-   for receiving) and, per send, a fresh `BluetoothGatt` central connection (for
-   sending) — so there's no "group owner" negotiation step at all.
-2. Presence/discovery is a separate, lightweight BLE advertise/scan beacon
-   (`BleMeshBeacon`) — it never carries alert data, only "a VIGILINK node is nearby."
-3. A theft alert is framed (`BleFraming`), sent as one or more GATT characteristic
-   writes, and acknowledged by the receiver (`alert_ack`) so a successful radio write
-   is never confused with confirmed delivery.
-4. `hopCount` counts **up** from 0 at the original reporter, +1 per real device that
-   relays it, capped at 5 hops to prevent infinite relay loops. Store-carry-forward
-   means a device doesn't need to be connected to everyone at once — it relays
-   automatically the next time it connects to a new peer, even much later. A manual
-   **"Force Relay"** button on the Alert Received screen is also available as an
-   explicit fallback alongside the automatic relay.
-5. Photos are deliberately never sent over the mesh (too large for a reliable BLE
-   payload) — only the vehicle's text/JSON details. The real photos sync in later via
-   Firestore once a device with the alert gets internet back.
-6. The mesh (and the Firestore internet alert feed) keep running even while the app
-   is backgrounded, via a foreground service (`flutter_foreground_task`,
-   `lib/services/mesh_background_service.dart`) — confirmed working with the app
-   fully backgrounded and the phone locked.
-
-The Dart-facing API (`lib/services/nearby_mesh_service.dart`) is intentionally shaped
-like a drop-in replacement for a Nearby-Connections-style library, so the rest of the
-app (`alert_ingest.dart`, `app_state.dart`, every screen) talks to it the same way
-regardless of what's underneath. See `Progress.md` for the detailed, dated history of
-every transport bug found and fixed to get here.
+- **Functional testing:** 13 test cases, all passed.
+- **Performance:** notification delay, successful alert transmission rate,
+  and multi-hop dissemination were measured during real multi-device
+  testing.
+- **Usability (System Usability Scale):** 70 respondents, mean score 85.0
+  ("Best Imaginable").
 
 ---
 
-## 📊 Evaluation Metrics (ISO/IEC 25010 + SUS)
-
-The app is designed to be evaluated using:
-- **ISO/IEC 25010**: Functional Suitability, Performance Efficiency, Usability, Reliability, Security
-- **System Usability Scale (SUS)**: 10-item Likert questionnaire post-demo
-
----
-
-## ⚙️ Running on Physical Android Device
-
-1. Enable **Developer Options** on your Android phone
-2. Enable **USB Debugging**
-3. Connect via USB
-4. Run: `flutter run`
-
-Or install the APK directly:
-```bash
-flutter build apk
-adb install build/app/outputs/flutter-apk/app-release.apk
-```
-
----
-
-## 📝 Notes
-
-- The app targets **Android 10+** (API 29+) per Chapter 3 hardware requirements
-- Proximity detection uses **simulated GPS** (50–100m radius) as specified in the scope
-- No external IoT hardware required — smartphone-only as per study delimitations
-- Data is stored locally in SQLite (offline-first) and synced to Firebase Firestore when online
-
----
-
-*Capstone Project — BS Information Technology*  
-*College of Computing and Information Sciences (CCIS)*  
-*Caraga State University — Main Campus*  
+*Capstone Project — BS Information Technology*
+*College of Computing and Information Sciences (CCIS)*
+*Caraga State University — Main Campus*
 *SY 2025–2026*
