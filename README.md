@@ -126,6 +126,33 @@ sign in; a pending or rejected account is blocked at login.
    flutter run -d chrome -t lib/admin_main.dart
    ```
 
+### Installing the Prebuilt APK on a Phone (no source build needed)
+
+If you already have `app-release.apk` (built above, or shared to you directly)
+and just want to install and run VIGILINK on an Android phone:
+
+1. **Get the APK onto the phone.** Any of these work:
+   - USB cable + `adb install build/app/outputs/flutter-apk/app-release.apk`
+     (phone needs Developer Options → USB Debugging turned on first).
+   - Transfer the file via USB file copy, email, or a cloud link (Drive,
+     Messenger, etc.), then open it from the phone's Files/Downloads app.
+2. **Allow installing from this source.** The first time, Android blocks it
+   with *"For your security, your phone is not allowed to install unknown
+   apps from this source."* Tap **Settings** on that prompt → toggle **Allow
+   from this source** → go back and tap **Install** again.
+3. **Wait for install to finish**, then tap **Open**, or find **VIGILINK** in
+   the app drawer.
+4. **Grant every permission requested on first launch** — Bluetooth,
+   Location, and Notifications. All three must actually be granted (not just
+   requested) for the ad hoc mesh and alerts to work at all; "While using the
+   app" is enough for Location.
+5. **Register or log in.** A new account needs driver's license photos and
+   admin approval before it can sign in — see the User Manual below for the
+   full registration steps. An already-approved account can log in right
+   away.
+
+---
+
 **Permissions required on the phone**
 - **Bluetooth** (scan/advertise/connect) — ad hoc mesh discovery and alert transfer.
 - **Location** (fine + coarse) — required by Android alongside Bluetooth LE, and for geofencing/GPS tagging.
